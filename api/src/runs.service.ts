@@ -2,7 +2,8 @@ import { Injectable, MessageEvent, NotFoundException } from "@nestjs/common";
 import { FindingSeverity, Prisma, RunStatus } from "@prisma/client";
 import { Observable, ReplaySubject } from "rxjs";
 import { PrismaService } from "./prisma.service";
-import { CreateRunDto } from "./run.dto";
+import { randomUUID } from "node:crypto";
+import { CreatePersonaDto, CreateRunDto, ReviewFindingDto } from "./run.dto";
 import { agentStages } from "./run.types";
 
 const wait = (milliseconds: number) =>
@@ -96,6 +97,16 @@ export class RunsService {
     return this.prisma.persona.findMany({ orderBy: { name: "asc" } });
   }
 
+  createPersona(dto: CreatePersonaDto) {
+    return this.prisma.persona.create({
+      data: {
+        id: `custom-${randomUUID()}`,
+        ...dto,
+        accessibility: dto.accessibility || null,
+      },
+    });
+  }
+
   runs() {
     return this.prisma.testRun.findMany({
       orderBy: { createdAt: "desc" },
@@ -121,6 +132,7 @@ export class RunsService {
         projectId: project.id,
         targetUrl: dto.targetUrl,
         goal: dto.goal,
+        successCriteria: dto.successCriteria,
         personaIds: dto.personaIds,
       },
       include: { project: true, findings: true, events: true },
@@ -129,7 +141,7 @@ export class RunsService {
 
   async start(id: string) {
     await this.run(id);
-    const stream = new ReplaySubject<MessageEvent>(32);
+    const stream = this.streams.get(id) ?? new ReplaySubject<MessageEvent>(32);
     this.streams.set(id, stream);
     const run = await this.prisma.testRun.update({
       where: { id },
@@ -147,6 +159,50 @@ export class RunsService {
       this.streams.set(id, stream);
     }
     return stream.asObservable();
+  }
+
+  async reviewFinding(runId: string, findingId: string, dto: ReviewFindingDto) {
+    const finding = await this.prisma.finding.findFirst({
+      where: { id: findingId, runId },
+    });
+    if (!finding) throw new NotFoundException("Finding not found");
+    return this.prisma.finding.update({
+      where: { id: findingId },
+      data: {
+        status: dto.status,
+        reviewNote:
+          dto.note ??
+          (dto.status === "Approved"
+            ? "Approved by a human reviewer for delivery planning."
+            : "Dismissed by a human reviewer after evidence review."),
+        reviewedAt: new Date(),
+      },
+    });
+  }
+
+  async createTickets(id: string) {
+    await this.run(id);
+    const approved = await this.prisma.finding.findMany({
+      where: { runId: id, status: "Approved" },
+      orderBy: { createdAt: "asc" },
+    });
+    const created = await this.prisma.$transaction(
+      approved.map((finding, index) => {
+        const ticketId = finding.ticketId ?? `TUX-${id.slice(-4).toUpperCase()}-${index + 1}`;
+        return this.prisma.finding.update({
+          where: { id: finding.id },
+          data: { ticketId, ticketStatus: "Draft" },
+        });
+      }),
+    );
+    return {
+      tickets: created.map((finding) => ({
+        id: finding.ticketId,
+        title: finding.title,
+        severity: finding.severity,
+        status: finding.ticketStatus,
+      })),
+    };
   }
 
   private async execute(id: string, stream: ReplaySubject<MessageEvent>) {

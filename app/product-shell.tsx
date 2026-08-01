@@ -26,7 +26,6 @@ import {
   MessageSquareText,
   MousePointer2,
   Network,
-  PanelLeftClose,
   Play,
   Plus,
   Radar,
@@ -67,6 +66,10 @@ interface Finding {
   journeyStep: string;
   recommendation: string;
   status: string;
+  reviewNote?: string;
+  reviewedAt?: string;
+  ticketId?: string;
+  ticketStatus?: string;
   evidence: {
     signal: string;
     selector: string;
@@ -96,7 +99,18 @@ interface TestRun {
   createdAt: string;
 }
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api";
+interface TicketDraft {
+  id: string;
+  findingId?: string;
+  title: string;
+  severity: string;
+  status: string;
+  createdAt?: string;
+}
+
+type CustomPersonaInput = Omit<Persona, "id">;
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? (process.env.NODE_ENV === "development" ? "http://localhost:4000/api" : "/api");
 
 const personaSeeds: Persona[] = [
   {
@@ -300,12 +314,55 @@ function normalizeFinding(raw: Record<string, unknown>): Finding {
     journeyStep: String(raw.journeyStep ?? "Journey"),
     recommendation: String(raw.recommendation ?? "Review the evidence and update the interaction."),
     status: String(raw.status ?? "Needs review"),
+    reviewNote: raw.reviewNote ? String(raw.reviewNote) : undefined,
+    reviewedAt: raw.reviewedAt ? String(raw.reviewedAt) : undefined,
+    ticketId: raw.ticketId ? String(raw.ticketId) : undefined,
+    ticketStatus: raw.ticketStatus ? String(raw.ticketStatus) : undefined,
     evidence: (raw.evidence as Finding["evidence"]) ?? {
       signal: "Behavior signal captured",
       selector: "page element",
       screenshot: "evidence.png",
     },
   };
+}
+
+function normalizeRun(raw: Record<string, unknown>): TestRun {
+  const createdAt = raw.createdAt ? new Date(String(raw.createdAt)) : null;
+  const personaIds = Array.isArray(raw.personaIds)
+    ? raw.personaIds
+    : (() => {
+        try {
+          return JSON.parse(String(raw.personaIds ?? "[]")) as string[];
+        } catch {
+          return [];
+        }
+      })();
+  const project = raw.project as { name?: string } | undefined;
+  const rawStatus = String(raw.status ?? "QUEUED");
+  return {
+    id: String(raw.id),
+    name: String(project?.name ?? raw.projectName ?? "UX simulation"),
+    goal: String(raw.goal ?? "Behavior simulation"),
+    targetUrl: String(raw.targetUrl ?? "").replace(/^https?:\/\//, ""),
+    status: rawStatus.charAt(0) + rawStatus.slice(1).toLowerCase(),
+    score: Number(raw.uxScore ?? raw.score ?? 0),
+    personas: personaIds.length,
+    findings: Array.isArray(raw.findings) ? raw.findings.length : Number(raw.frictionCount ?? 0),
+    createdAt: createdAt && !Number.isNaN(createdAt.valueOf())
+      ? createdAt.toLocaleDateString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+      : "Recent",
+  };
+}
+
+function downloadText(filename: string, textContent: string, type: string) {
+  const url = URL.createObjectURL(new Blob([textContent], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 function sleep(milliseconds: number) {
@@ -330,6 +387,15 @@ export function ProductShell() {
   const [runtime, setRuntime] = useState<"connected" | "demo">("demo");
   const [isLaunching, setIsLaunching] = useState(false);
   const [toast, setToast] = useState("");
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [notificationOpen, setNotificationOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [personaOpen, setPersonaOpen] = useState(false);
+  const [ticketDrafts, setTicketDrafts] = useState<TicketDraft[]>([]);
+  const [ticketsOpen, setTicketsOpen] = useState(false);
+  const [safeMode, setSafeMode] = useState(true);
+  const [evidenceCapture, setEvidenceCapture] = useState(true);
   const [projectName, setProjectName] = useState("Nova Commerce");
   const [targetUrl, setTargetUrl] = useState("https://demo.traceux.app/checkout");
   const [goal, setGoal] = useState("Find anything that prevents a first-time customer from completing checkout confidently.");
@@ -352,19 +418,9 @@ export function ProductShell() {
           const remoteRuns = (await runsResponse.json()) as Array<Record<string, unknown>>;
           if (remoteRuns.length) {
             setRuns((current) => [
-              ...remoteRuns.slice(0, 4).map((run) => ({
-                id: String(run.id),
-                name: String((run.project as { name?: string })?.name ?? "UX simulation"),
-                goal: String(run.goal),
-                targetUrl: String(run.targetUrl).replace(/^https?:\/\//, ""),
-                status: String(run.status).replace("REVIEW", "Review").replace("COMPLETED", "Completed"),
-                score: Number(run.uxScore ?? 78),
-                personas: Array.isArray(run.personaIds) ? run.personaIds.length : 4,
-                findings: Array.isArray(run.findings) ? run.findings.length : 0,
-                createdAt: "Recent",
-              })),
+              ...remoteRuns.slice(0, 8).map(normalizeRun),
               ...current,
-            ].slice(0, 8));
+            ].filter((run, index, all) => all.findIndex((candidate) => candidate.id === run.id) === index).slice(0, 10));
           }
         }
       } catch {
@@ -374,6 +430,21 @@ export function ProductShell() {
 
     void loadRuntime();
     return () => eventSourceRef.current?.close();
+  }, []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      const stored = window.localStorage.getItem("traceux-settings");
+      if (!stored) return;
+      try {
+        const settings = JSON.parse(stored) as { safeMode?: boolean; evidenceCapture?: boolean };
+        setSafeMode(settings.safeMode ?? true);
+        setEvidenceCapture(settings.evidenceCapture ?? true);
+      } catch {
+        window.localStorage.removeItem("traceux-settings");
+      }
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, []);
 
   useEffect(() => {
@@ -428,26 +499,59 @@ export function ProductShell() {
       setRunStatus("Ready for review");
       setIsLaunching(false);
       setToast("Simulation complete — three verified findings are ready.");
+      setRuns((current) => current.map((item) => item.id === id ? { ...item, status: "Review", score: 72, findings: run.findings?.length ?? 3 } : item));
       source.close();
     });
     source.onerror = () => {
       source.close();
+      window.setTimeout(async () => {
+        try {
+          const response = await fetch(`${API_URL}/runs/${id}`);
+          if (!response.ok) throw new Error("Run recovery failed");
+          const run = await response.json() as Record<string, unknown>;
+          if (String(run.status) === "REVIEW") {
+            setEvents(Array.isArray(run.events) ? (run.events as AgentEvent[]) : []);
+            setFindings(Array.isArray(run.findings) ? (run.findings as Array<Record<string, unknown>>).map(normalizeFinding) : []);
+            setProgress(100);
+            setRunStatus("Ready for review");
+            setIsLaunching(false);
+            setToast("Simulation complete — the verified run was recovered.");
+          }
+        } catch {
+          setIsLaunching(false);
+          setToast("The live stream disconnected. Reopen the saved run from history.");
+        }
+      }, 700);
     };
   }
 
-  async function simulateLocally() {
-    setRuntime("demo");
-    for (let index = 0; index < localAgentStages.length; index += 1) {
-      await sleep(430);
-      const stage = localAgentStages[index];
+  async function animatePersistedRun(run: Record<string, unknown>) {
+    const storedEvents = Array.isArray(run.events) ? run.events as Array<Record<string, unknown>> : [];
+    const stages = storedEvents.length
+      ? storedEvents.map((event) => ({
+          id: String(event.id ?? crypto.randomUUID()),
+          agent: String(event.agent),
+          title: String(event.title),
+          detail: String(event.detail),
+          progress: Number(event.progress),
+          kind: String(event.kind),
+          createdAt: event.createdAt ? String(event.createdAt) : undefined,
+        }))
+      : localAgentStages.map((stage) => ({ ...stage, id: crypto.randomUUID() }));
+    for (let index = 0; index < stages.length; index += 1) {
+      await sleep(260);
+      const stage = stages[index];
       setEvents((current) => [...current, { ...stage, id: `local-${Date.now()}-${index}` }]);
       setProgress(stage.progress);
       setRunStatus(`${agentNames[stage.agent] ?? stage.agent} working`);
     }
-    setFindings(findingSeeds);
+    const storedFindings = Array.isArray(run.findings) ? run.findings as Array<Record<string, unknown>> : [];
+    setFindings(storedFindings.map(normalizeFinding));
     setRunStatus("Ready for review");
     setIsLaunching(false);
     setToast("Simulation complete — three verified findings are ready.");
+    const id = String(run.id);
+    setRuns((current) => current.map((item) => item.id === id ? { ...normalizeRun(run), createdAt: item.createdAt } : item));
   }
 
   async function launchSimulation(event: FormEvent) {
@@ -473,9 +577,12 @@ export function ProductShell() {
       });
       if (!createdResponse.ok) throw new Error("Runtime unavailable");
       const created = (await createdResponse.json()) as { id: string };
-      connectRunStream(created.id);
+      setActiveRunId(created.id);
+      const streamingRuntime = API_URL.startsWith("http");
+      if (streamingRuntime) connectRunStream(created.id);
       const startResponse = await fetch(`${API_URL}/runs/${created.id}/start`, { method: "POST" });
       if (!startResponse.ok) throw new Error("Run did not start");
+      const started = (await startResponse.json()) as Record<string, unknown>;
       setRuntime("connected");
       setRuns((current) => [
         {
@@ -491,19 +598,143 @@ export function ProductShell() {
         },
         ...current,
       ]);
+      if (!streamingRuntime && String(started.status) === "REVIEW") {
+        await animatePersistedRun(started);
+      }
     } catch {
-      await fetch("/api/runs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      }).catch(() => undefined);
-      void simulateLocally();
+      eventSourceRef.current?.close();
+      setIsLaunching(false);
+      setRuntime("demo");
+      setView("scenario");
+      setToast("The run could not start. Your scenario is preserved — retry when the runtime is available.");
     }
   }
 
-  function reviewFinding(id: string, nextStatus: "Approved" | "Dismissed") {
+  async function reviewFinding(id: string, nextStatus: "Approved" | "Dismissed") {
+    const previous = findings;
     setFindings((current) => current.map((finding) => (finding.id === id ? { ...finding, status: nextStatus } : finding)));
-    setToast(nextStatus === "Approved" ? "Finding approved and added to the report." : "Finding dismissed with an audit note.");
+    if (!activeRunId) {
+      setToast(nextStatus === "Approved" ? "Demo finding approved. Launch a run to save review decisions." : "Demo finding dismissed. Launch a run to save review decisions.");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_URL}/runs/${activeRunId}/findings/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      if (!response.ok) throw new Error("Review was not saved");
+      const saved = normalizeFinding(await response.json() as Record<string, unknown>);
+      setFindings((current) => current.map((finding) => finding.id === id ? saved : finding));
+      setToast(nextStatus === "Approved" ? "Finding approved and saved to the delivery workflow." : "Finding dismissed and the audit decision was saved.");
+    } catch {
+      setFindings(previous);
+      setToast("The review decision could not be saved. Please retry.");
+    }
+  }
+
+  async function openRun(id: string) {
+    try {
+      const response = await fetch(`${API_URL}/runs/${id}`);
+      if (!response.ok) throw new Error("Run unavailable");
+      const run = await response.json() as Record<string, unknown>;
+      setActiveRunId(id);
+      setProjectName(String((run.project as { name?: string } | undefined)?.name ?? run.projectName ?? "UX simulation"));
+      setTargetUrl(String(run.targetUrl ?? ""));
+      setGoal(String(run.goal ?? "Behavior simulation"));
+      setSuccessCriteria(String(run.successCriteria ?? "The defined journey completes successfully."));
+      if (Array.isArray(run.personaIds)) setSelectedPersonas(run.personaIds.map(String));
+      setEvents(Array.isArray(run.events) ? (run.events as Array<Record<string, unknown>>).map((event) => ({
+        id: String(event.id), agent: String(event.agent), title: String(event.title), detail: String(event.detail), progress: Number(event.progress), kind: String(event.kind), createdAt: event.createdAt ? String(event.createdAt) : undefined,
+      })) : eventSeeds);
+      setFindings(Array.isArray(run.findings) ? (run.findings as Array<Record<string, unknown>>).map(normalizeFinding) : findingSeeds);
+      setProgress(Number(run.progress ?? 100));
+      setRunStatus(String(run.status) === "RUNNING" ? "Agents working" : "Ready for review");
+      navigate("live");
+    } catch {
+      navigate("live");
+      setToast("This sample run is read-only. Launch a new run for persistent workflow actions.");
+    }
+  }
+
+  function exportReport() {
+    const lines = [
+      `# TraceUX report — ${projectName}`,
+      "",
+      `Target: ${targetUrl}`,
+      `Goal: ${goal}`,
+      `Success criteria: ${successCriteria}`,
+      "",
+      ...findings.flatMap((finding, index) => [
+        `## ${index + 1}. ${finding.title}`,
+        `Severity: ${finding.severity} · Confidence: ${finding.confidence}% · Status: ${finding.status}`,
+        `Persona: ${finding.persona} · Journey: ${finding.journeyStep}`,
+        "",
+        finding.summary,
+        "",
+        `Evidence: ${finding.evidence.signal} (${finding.evidence.selector})`,
+        `Recommendation: ${finding.recommendation}`,
+        finding.ticketId ? `Ticket draft: ${finding.ticketId}` : "",
+        "",
+      ]),
+    ];
+    downloadText(`traceux-${projectName.toLowerCase().replace(/[^a-z0-9]+/g, "-")}-report.md`, lines.join("\n"), "text/markdown");
+    setToast("Report exported with findings, evidence, and review status.");
+  }
+
+  async function createTickets() {
+    const approved = findings.filter((finding) => finding.status === "Approved");
+    if (!approved.length) {
+      setToast("Approve at least one finding before creating ticket drafts.");
+      return;
+    }
+    try {
+      let tickets: TicketDraft[];
+      if (activeRunId) {
+        const response = await fetch(`${API_URL}/runs/${activeRunId}/tickets`, { method: "POST" });
+        if (!response.ok) throw new Error("Ticket drafts were not created");
+        tickets = ((await response.json()) as { tickets: TicketDraft[] }).tickets;
+      } else {
+        tickets = approved.map((finding, index) => ({ id: `TUX-DEMO-${index + 1}`, title: finding.title, severity: finding.severity, status: "Draft" }));
+      }
+      setTicketDrafts(tickets);
+      setTicketsOpen(true);
+      setFindings((current) => current.map((finding) => {
+        const ticket = tickets.find((candidate) => candidate.findingId === finding.id || candidate.title === finding.title);
+        return ticket ? { ...finding, ticketId: ticket.id, ticketStatus: ticket.status } : finding;
+      }));
+      setToast(`${tickets.length} human-approved ticket draft${tickets.length === 1 ? "" : "s"} created.`);
+    } catch {
+      setToast("Ticket drafts could not be created. Review decisions are still saved.");
+    }
+  }
+
+  async function createPersona(input: CustomPersonaInput) {
+    const response = await fetch(`${API_URL}/personas`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!response.ok) throw new Error("Persona was not saved");
+    const persona = await response.json() as Persona;
+    setPersonas((current) => [...current, persona]);
+    setSelectedPersonas((current) => [...current, persona.id]);
+    setPersonaOpen(false);
+    setToast(`${persona.name} was saved and selected for the next run.`);
+  }
+
+  function saveSettings(nextSafeMode: boolean, nextEvidenceCapture: boolean) {
+    setSafeMode(nextSafeMode);
+    setEvidenceCapture(nextEvidenceCapture);
+    window.localStorage.setItem("traceux-settings", JSON.stringify({ safeMode: nextSafeMode, evidenceCapture: nextEvidenceCapture }));
+    setSettingsOpen(false);
+    setToast("Execution preferences saved for this device.");
+  }
+
+  function prepareNewRun() {
+    eventSourceRef.current?.close();
+    setIsLaunching(false);
+    navigate("scenario");
   }
 
   return (
@@ -540,9 +771,9 @@ export function ProductShell() {
         <div className="sidebar-spacer" />
         <div className="runtime-card">
           <div className="runtime-title"><span className={`runtime-dot ${runtime}`} />{runtime === "connected" ? "Agent runtime online" : "Demo runtime ready"}</div>
-          <p>{runtime === "connected" ? "NestJS · PostgreSQL" : "No external AI key required"}</p>
+          <p>{runtime === "connected" ? "Persistent workflow · review gated" : "Runtime connection required"}</p>
         </div>
-        <button className="nav-settings"><Settings size={18} />Settings</button>
+        <button className="nav-settings" onClick={() => setSettingsOpen(true)}><Settings size={18} />Settings</button>
         <div className="profile-row">
           <span className="profile-avatar">AK</span>
           <span><strong>Aravind Kumar</strong><small>Product workspace</small></span>
@@ -557,9 +788,11 @@ export function ProductShell() {
           <button className="mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button>
           <div className="breadcrumbs"><span>Nova Commerce</span><ChevronRight size={14} /><strong>{navItems.find((item) => item.id === view)?.label}</strong></div>
           <div className="top-actions">
-            <button className="icon-button" aria-label="Search"><Search size={18} /></button>
-            <button className="icon-button notification-button" aria-label="Notifications"><MessageSquareText size={18} /><span /></button>
+            <button className="icon-button" aria-label="Search" aria-expanded={searchOpen} onClick={() => { setSearchOpen((open) => !open); setNotificationOpen(false); }}><Search size={18} /></button>
+            <button className="icon-button notification-button" aria-label="Notifications" aria-expanded={notificationOpen} onClick={() => { setNotificationOpen((open) => !open); setSearchOpen(false); }}><MessageSquareText size={18} /><span /></button>
             <button className="button-primary compact" onClick={() => navigate("scenario")}><Plus size={17} />New simulation</button>
+            {searchOpen && <SearchPanel runs={runs} findings={findings} onNavigate={(next) => { setSearchOpen(false); navigate(next); }} onOpenRun={(id) => { setSearchOpen(false); void openRun(id); }} />}
+            {notificationOpen && <NotificationPanel findings={findings} onNavigate={(next) => { setNotificationOpen(false); navigate(next); }} />}
           </div>
         </header>
 
@@ -592,6 +825,9 @@ export function ProductShell() {
           )}
           {view === "live" && (
             <LiveRunView
+              projectName={projectName}
+              targetUrl={targetUrl}
+              personaCount={selectedPersonas.length}
               progress={progress}
               status={runStatus}
               events={events}
@@ -599,20 +835,30 @@ export function ProductShell() {
               activeEvent={activeEvent}
               runtime={runtime}
               onViewFindings={() => navigate("findings")}
-              onNewRun={() => navigate("scenario")}
+              onNewRun={prepareNewRun}
             />
           )}
           {view === "findings" && (
-            <FindingsView findings={findings.length ? findings : findingSeeds} onReview={reviewFinding} />
+            <FindingsView findings={findings.length ? findings : findingSeeds} onReview={reviewFinding} onExport={exportReport} onCreateTickets={createTickets} />
           )}
           {view === "personas" && (
-            <PersonasView personas={personas} selectedPersonas={selectedPersonas} togglePersona={togglePersona} onUse={() => navigate("scenario")} />
+            <PersonasView personas={personas} selectedPersonas={selectedPersonas} togglePersona={togglePersona} onUse={() => navigate("scenario")} onCreate={() => setPersonaOpen(true)} />
           )}
-          {view === "history" && <HistoryView runs={runs} onOpen={() => navigate("live")} />}
+          {view === "history" && <HistoryView runs={runs} onOpen={(id) => void openRun(id)} onExport={() => {
+            const rows = [["Simulation", "Status", "Coverage", "Findings", "UX score", "Target"], ...runs.map((run) => [run.name, run.status, String(run.personas), String(run.findings), String(run.score), run.targetUrl])];
+            downloadText("traceux-run-history.csv", rows.map((row) => row.map((cell) => `"${cell.replaceAll('"', '""')}"`).join(",")).join("\n"), "text/csv");
+            setToast("Run history exported as CSV.");
+          }} />}
         </div>
       </main>
 
       {toast && <div className="toast"><CheckCircle2 size={18} />{toast}</div>}
+      {settingsOpen && <SettingsDialog safeMode={safeMode} evidenceCapture={evidenceCapture} onClose={() => setSettingsOpen(false)} onSave={saveSettings} />}
+      {personaOpen && <PersonaDialog onClose={() => setPersonaOpen(false)} onCreate={createPersona} />}
+      {ticketsOpen && <TicketDialog tickets={ticketDrafts} onClose={() => setTicketsOpen(false)} onExport={() => {
+        downloadText("traceux-ticket-drafts.json", JSON.stringify(ticketDrafts, null, 2), "application/json");
+        setToast("Ticket drafts exported as integration-ready JSON.");
+      }} />}
       {selectedFinding && <span className="sr-only">Top finding: {selectedFinding.title}</span>}
     </div>
   );
@@ -772,18 +1018,18 @@ function ScenarioView({ projectName, setProjectName, targetUrl, setTargetUrl, go
   );
 }
 
-function LiveRunView({ progress, status, events, findings, activeEvent, runtime, onViewFindings, onNewRun }: { progress: number; status: string; events: AgentEvent[]; findings: Finding[]; activeEvent?: AgentEvent; runtime: "connected" | "demo"; onViewFindings: () => void; onNewRun: () => void }) {
+function LiveRunView({ projectName, targetUrl, personaCount, progress, status, events, findings, activeEvent, runtime, onViewFindings, onNewRun }: { projectName: string; targetUrl: string; personaCount: number; progress: number; status: string; events: AgentEvent[]; findings: Finding[]; activeEvent?: AgentEvent; runtime: "connected" | "demo"; onViewFindings: () => void; onNewRun: () => void }) {
   const isComplete = progress === 100;
   return (
     <div className="view-stack live-view">
-      <PageHeading eyebrow="Run command center" title="Checkout confidence" copy="Four behavior policies are testing the complete purchase journey." actions={<><span className={`live-status ${isComplete ? "complete" : "running"}`}><span />{isComplete ? "Ready for review" : status}</span><button className="button-secondary compact" onClick={onNewRun}><Plus size={16} />New run</button></>} />
+      <PageHeading eyebrow="Run command center" title={projectName} copy={`${personaCount} behavior ${personaCount === 1 ? "policy is" : "policies are"} testing the defined journey.`} actions={<><span className={`live-status ${isComplete ? "complete" : "running"}`}><span />{isComplete ? "Ready for review" : status}</span><button className="button-secondary compact" onClick={onNewRun}><Plus size={16} />New run</button></>} />
       <section className="run-progress-panel panel">
         <div className="run-progress-copy"><span>{isComplete ? <CheckCircle2 size={18} /> : <Activity size={18} />}</span><div><strong>{isComplete ? "Simulation complete" : status}</strong><small>{activeEvent?.detail ?? "All verified evidence is ready for human review."}</small></div></div>
         <div className="progress-wrap"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><strong>{progress}%</strong></div>
-        <span className="runtime-chip"><CircleDot size={14} />{runtime === "connected" ? "Live NestJS runtime" : "Local demo runtime"}</span>
+        <span className="runtime-chip"><CircleDot size={14} />{runtime === "connected" ? "Persistent agent runtime" : "Runtime reconnecting"}</span>
       </section>
       <section className="command-grid">
-        <BrowserPreview progress={progress} />
+        <BrowserPreview progress={progress} targetUrl={targetUrl} />
         <div className="panel agent-feed">
           <div className="panel-heading"><div><p className="eyebrow">Agent activity</p><h2>Reasoning trace</h2></div><span className="event-count">{events.length} events</span></div>
           <div className="event-list">
@@ -793,7 +1039,7 @@ function LiveRunView({ progress, status, events, findings, activeEvent, runtime,
       </section>
       <section className="live-bottom-grid">
         <div className="panel behavior-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Behavior telemetry</p><h2>Journey signals</h2></div><span className="status-pill neutral">4 personas</span></div>
+          <div className="panel-heading"><div><p className="eyebrow">Behavior telemetry</p><h2>Journey signals</h2></div><span className="status-pill neutral">{personaCount} personas</span></div>
           <div className="signal-grid"><Signal icon={MousePointer2} value="36" label="Interactions" /><Signal icon={Clock3} value="14.2s" label="Peak dwell" /><Signal icon={AlertTriangle} value="5" label="Hesitations" /><Signal icon={Keyboard} value="1" label="Focus failure" /></div>
           <div className="persona-lanes">
             {[{ name: "First-time Explorer", progress: 82, state: "Completed" }, { name: "Impatient Shopper", progress: 64, state: "Abandoned" }, { name: "Keyboard Navigator", progress: 48, state: "Blocked" }, { name: "Cautious Buyer", progress: 76, state: "Completed" }].map((persona) => <div key={persona.name}><span>{persona.name}</span><div><i style={{ width: `${persona.progress}%` }} /></div><small className={persona.state.toLowerCase()}>{persona.state}</small></div>)}
@@ -802,22 +1048,24 @@ function LiveRunView({ progress, status, events, findings, activeEvent, runtime,
         <div className="panel verified-panel">
           <div className="verified-icon"><ShieldCheck size={24} /></div><p className="eyebrow">Verified output</p><h2>{findings.length || 3} findings with evidence</h2><p>The verifier removed unsupported observations. Every retained issue includes behavior signals, a page locator, and a recommended fix.</p>
           <div className="verified-stats"><span><strong>{findings.filter((finding) => finding.severity === "Critical").length || 1}</strong>critical</span><span><strong>94%</strong>avg confidence</span><span><strong>2</strong>personas blocked</span></div>
-          <button className="button-primary" onClick={onViewFindings}>Review findings <ArrowRight size={16} /></button>
+        <button className="button-primary" onClick={onViewFindings} disabled={!isComplete}>Review findings <ArrowRight size={16} /></button>
         </div>
       </section>
     </div>
   );
 }
 
-function BrowserPreview({ progress }: { progress: number }) {
+function BrowserPreview({ progress, targetUrl }: { progress: number; targetUrl: string }) {
+  const [paymentReady, setPaymentReady] = useState(false);
+  const [promoOpen, setPromoOpen] = useState(false);
   return (
     <div className="panel browser-panel">
-      <div className="browser-bar"><span className="window-dots"><i /><i /><i /></span><div className="browser-address"><ShieldCheck size={13} />demo.traceux.app/checkout</div><span className="viewport-pill">1280 × 800</span></div>
+      <div className="browser-bar"><span className="window-dots"><i /><i /><i /></span><div className="browser-address"><ShieldCheck size={13} />{targetUrl.replace(/^https?:\/\//, "")}</div><span className="viewport-pill">1280 × 800</span></div>
       <div className="browser-stage">
         <div className="mock-store-header"><strong>NOVA</strong><span>New in&nbsp;&nbsp;&nbsp; Women&nbsp;&nbsp;&nbsp; Men&nbsp;&nbsp;&nbsp; Journal</span><span><Search size={15} /><Users size={15} /></span></div>
         <div className="checkout-layout">
-          <div className="checkout-form"><span className="mock-back">← Return to cart</span><h3>Secure checkout</h3><div className="step-pills"><span className="done">1</span><i /><span className="done">2</span><i /><span>3</span></div><label>Email address<input value="alex@example.com" readOnly /></label><div className="field-pair"><label>First name<input value="Alex" readOnly /></label><label>Last name<input value="Morgan" readOnly /></label></div><label>Delivery option<div className="mock-radio selected"><CircleDot size={15} /><span>Express delivery<small>Arrives tomorrow</small></span><strong>₹240</strong></div></label><button>Continue to payment</button></div>
-          <div className="order-card"><p>Order summary</p><div className="product-thumb" /><strong>Everyday Runner</strong><small>Cloud / EU 39</small><hr /><span><small>Subtotal</small><strong>₹6,490</strong></span><span className="risk-line"><small>Delivery</small><strong>₹240</strong><i>Late reveal</i></span><span><small>Total</small><strong>₹6,730</strong></span><button className="promo-control">Add promotion code <ChevronDown size={14} /></button></div>
+          <div className="checkout-form"><span className="mock-back">← Return to cart</span><h3>{paymentReady ? "Payment ready" : "Secure checkout"}</h3><div className="step-pills"><span className="done">1</span><i /><span className="done">2</span><i /><span className={paymentReady ? "done" : ""}>3</span></div><label>Email address<input value="alex@example.com" readOnly /></label><div className="field-pair"><label>First name<input value="Alex" readOnly /></label><label>Last name<input value="Morgan" readOnly /></label></div><label>Delivery option<div className="mock-radio selected"><CircleDot size={15} /><span>Express delivery<small>Arrives tomorrow</small></span><strong>₹240</strong></div></label><button type="button" onClick={() => setPaymentReady(true)}>{paymentReady ? "Payment step reached" : "Continue to payment"}</button></div>
+          <div className="order-card"><p>Order summary</p><div className="product-thumb" /><strong>Everyday Runner</strong><small>Cloud / EU 39</small><hr /><span><small>Subtotal</small><strong>₹6,490</strong></span><span className="risk-line"><small>Delivery</small><strong>₹240</strong><i>Late reveal</i></span><span><small>Total</small><strong>₹6,730</strong></span><button type="button" className="promo-control" aria-expanded={promoOpen} onClick={() => setPromoOpen((open) => !open)}>Add promotion code <ChevronDown size={14} /></button>{promoOpen && <input className="promo-input" aria-label="Promotion code" placeholder="Enter code" />}</div>
         </div>
         {progress > 35 && progress < 100 && <div className="agent-cursor" style={{ left: `${Math.min(78, 28 + progress / 2)}%`, top: `${Math.max(34, 70 - progress / 3)}%` }}><MousePointer2 size={16} /><span>{progress < 65 ? "Impatient Shopper" : "Observer"}</span></div>}
         {progress === 100 && <><div className="risk-outline delivery-risk"><span>01</span></div><div className="risk-outline promo-risk"><span>02</span></div></>}
@@ -837,17 +1085,20 @@ function Signal({ icon: Icon, value, label }: { icon: LucideIcon; value: string;
   return <div><Icon size={17} /><span><strong>{value}</strong><small>{label}</small></span></div>;
 }
 
-function FindingsView({ findings, onReview }: { findings: Finding[]; onReview: (id: string, status: "Approved" | "Dismissed") => void }) {
+function FindingsView({ findings, onReview, onExport, onCreateTickets }: { findings: Finding[]; onReview: (id: string, status: "Approved" | "Dismissed") => void; onExport: () => void; onCreateTickets: () => void }) {
   const [selectedId, setSelectedId] = useState(findings[0]?.id ?? "");
+  const [sortMode, setSortMode] = useState<"priority" | "confidence">("priority");
   const selected = findings.find((finding) => finding.id === selectedId) ?? findings[0];
+  const severityRank: Record<Severity, number> = { Critical: 4, High: 3, Medium: 2, Low: 1 };
+  const sortedFindings = [...findings].sort((a, b) => sortMode === "priority" ? severityRank[b.severity] - severityRank[a.severity] : b.confidence - a.confidence);
   if (!selected) return null;
   return (
     <div className="view-stack findings-view">
-      <PageHeading eyebrow="Evidence review" title="Verified UX findings" copy="Each issue has passed the evidence check. Approve what should enter the delivery workflow." actions={<><button className="button-secondary compact"><FileText size={16} />Export report</button><button className="button-primary compact"><Zap size={16} />Create tickets</button></>} />
+      <PageHeading eyebrow="Evidence review" title="Verified UX findings" copy="Each issue has passed the evidence check. Approve what should enter the delivery workflow." actions={<><button className="button-secondary compact" onClick={onExport}><FileText size={16} />Export report</button><button className="button-primary compact" onClick={onCreateTickets}><Zap size={16} />Create tickets</button></>} />
       <section className="review-layout">
         <div className="panel finding-queue">
-          <div className="queue-toolbar"><span><strong>{findings.length}</strong> verified findings</span><button><BarChart3 size={15} />Priority order<ChevronDown size={14} /></button></div>
-          {findings.map((finding) => <button key={finding.id} className={`queue-item ${selected.id === finding.id ? "selected" : ""}`} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity.toLowerCase()}`}><AlertTriangle size={16} /></span><span><span className="queue-title"><strong>{finding.title}</strong><span className={`severity-pill ${finding.severity.toLowerCase()}`}>{finding.severity}</span></span><small>{finding.journeyStep}</small><p>{finding.summary}</p><span className="queue-meta"><small>{finding.persona}</small><small>{finding.confidence}% confidence</small><small className={finding.status.toLowerCase().replace(" ", "-")}>{finding.status}</small></span></span><ChevronRight size={17} /></button>)}
+          <div className="queue-toolbar"><span><strong>{findings.length}</strong> verified findings</span><label className="compact-select"><BarChart3 size={15} /><span className="sr-only">Sort findings</span><select aria-label="Sort findings" value={sortMode} onChange={(event) => setSortMode(event.target.value as "priority" | "confidence")}><option value="priority">Priority order</option><option value="confidence">Confidence</option></select><ChevronDown size={14} /></label></div>
+          {sortedFindings.map((finding) => <button key={finding.id} className={`queue-item ${selected.id === finding.id ? "selected" : ""}`} onClick={() => setSelectedId(finding.id)}><span className={`severity-mark ${finding.severity.toLowerCase()}`}><AlertTriangle size={16} /></span><span><span className="queue-title"><strong>{finding.title}</strong><span className={`severity-pill ${finding.severity.toLowerCase()}`}>{finding.severity}</span></span><small>{finding.journeyStep}</small><p>{finding.summary}</p><span className="queue-meta"><small>{finding.persona}</small><small>{finding.confidence}% confidence</small><small className={finding.status.toLowerCase().replace(" ", "-")}>{finding.status}</small>{finding.ticketId && <small>{finding.ticketId}</small>}</span></span><ChevronRight size={17} /></button>)}
         </div>
         <article className="finding-detail">
           <div className="panel detail-header"><div className="detail-title-row"><span className={`severity-mark large ${selected.severity.toLowerCase()}`}><AlertTriangle size={20} /></span><div><span className={`severity-pill ${selected.severity.toLowerCase()}`}>{selected.severity} severity</span><h2>{selected.title}</h2><p>{selected.summary}</p></div></div><div className="confidence-block"><strong>{selected.confidence}%</strong><span>confidence</span></div></div>
@@ -860,25 +1111,125 @@ function FindingsView({ findings, onReview }: { findings: Finding[]; onReview: (
   );
 }
 
-function PersonasView({ personas, selectedPersonas, togglePersona, onUse }: { personas: Persona[]; selectedPersonas: string[]; togglePersona: (id: string) => void; onUse: () => void }) {
+function PersonasView({ personas, selectedPersonas, togglePersona, onUse, onCreate }: { personas: Persona[]; selectedPersonas: string[]; togglePersona: (id: string) => void; onUse: () => void; onCreate: () => void }) {
   return (
     <div className="view-stack personas-view">
       <PageHeading eyebrow="Persona lab" title="Model meaningful human differences" copy="Behavior policies influence reading depth, patience, confidence, device habits, recovery, and accessibility needs." actions={<button className="button-primary compact" onClick={onUse}><Play size={16} />Use selected personas</button>} />
       <section className="persona-hero panel"><div><span className="hero-kicker"><BrainCircuit size={15} />Behavior, not demographics</span><h2>Test the reasons people behave differently.</h2><p>Each persona is a transparent, reusable policy. Combine them to expose friction that fixed scripts cannot model.</p></div><div className="behavior-orbit"><span className="orbit-center"><Users size={24} /></span>{["Patience", "Trust", "Literacy", "Mobility"].map((label, index) => <span key={label} className={`orbit-node node-${index + 1}`}>{label}</span>)}</div></section>
       <section className="persona-library">
         {personas.map((persona, index) => { const selected = selectedPersonas.includes(persona.id); return <article className={`persona-profile panel ${selected ? "selected" : ""}`} key={persona.id}><div className="persona-profile-top"><span className={`profile-symbol symbol-${index + 1}`}>{persona.name.split(" ").map((word) => word[0]).join("").slice(0, 2)}</span><button onClick={() => togglePersona(persona.id)} aria-pressed={selected}>{selected ? <><Check size={14} />Selected</> : <><Plus size={14} />Select</>}</button></div><h2>{persona.name}</h2><p>{persona.description}</p><div className="persona-traits">{persona.traits.map((trait) => <span key={trait}>{trait}</span>)}</div><div className="behavior-bars"><div><span>Patience<strong>{persona.patience}%</strong></span><i><b style={{ width: `${persona.patience}%` }} /></i></div><div><span>Confidence<strong>{persona.confidence}%</strong></span><i><b style={{ width: `${persona.confidence}%` }} /></i></div></div>{persona.accessibility && <div className="accessibility-note"><Keyboard size={15} />{persona.accessibility}</div>}</article>; })}
-        <button className="new-persona-card"><span><Plus size={22} /></span><strong>Create custom persona</strong><p>Define a behavior policy for your product or customer segment.</p></button>
+        <button className="new-persona-card" onClick={onCreate}><span><Plus size={22} /></span><strong>Create custom persona</strong><p>Define a behavior policy for your product or customer segment.</p></button>
       </section>
     </div>
   );
 }
 
-function HistoryView({ runs, onOpen }: { runs: TestRun[]; onOpen: () => void }) {
+function HistoryView({ runs, onOpen, onExport }: { runs: TestRun[]; onOpen: (id: string) => void; onExport: () => void }) {
+  const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
+  const visibleRuns = runs
+    .filter((run) => statusFilter === "All" || run.status === statusFilter)
+    .filter((run) => `${run.name} ${run.targetUrl} ${run.goal}`.toLowerCase().includes(query.toLowerCase()))
+    .filter((run, index, all) => all.findIndex((candidate) => candidate.id === run.id) === index);
+  if (sortOrder === "oldest") visibleRuns.reverse();
   return (
     <div className="view-stack history-view">
-      <PageHeading eyebrow="Run history" title="Track UX quality over time" copy="Compare behavior coverage, evidence, and outcomes across every release candidate." actions={<button className="button-secondary compact"><FileText size={16} />Export history</button>} />
+      <PageHeading eyebrow="Run history" title="Track UX quality over time" copy="Compare behavior coverage, evidence, and outcomes across every release candidate." actions={<button className="button-secondary compact" onClick={onExport}><FileText size={16} />Export history</button>} />
       <section className="history-summary"><div className="panel"><span><BarChart3 size={18} /></span><div><small>UX score trend</small><strong>+11 points</strong><p>Across the last 30 days</p></div></div><div className="panel"><span><BadgeCheck size={18} /></span><div><small>Verified fixes</small><strong>18 shipped</strong><p>82% resolution rate</p></div></div><div className="panel"><span><Clock3 size={18} /></span><div><small>Feedback speed</small><strong>4.8 minutes</strong><p>Average simulation time</p></div></div></section>
-      <section className="panel history-table-wrap"><div className="table-toolbar"><div className="search-field"><Search size={16} /><input aria-label="Search runs" placeholder="Search simulations" /></div><button>All statuses <ChevronDown size={14} /></button><button>Newest first <ChevronDown size={14} /></button></div><div className="history-table"><div className="history-head"><span>Simulation</span><span>Status</span><span>Coverage</span><span>Findings</span><span>UX score</span><span /></div>{runs.map((run) => <button className="history-row" key={run.id} onClick={onOpen}><span><span className="run-icon"><TestTube2 size={17} /></span><span><strong>{run.name}</strong><small>{run.targetUrl} · {run.createdAt}</small></span></span><span><i className={`status-pill ${run.status.toLowerCase()}`}>{run.status}</i></span><span>{run.personas} personas</span><span>{run.findings} findings</span><span><strong className={`table-score ${run.score < 75 ? "risk" : ""}`}>{run.score || "—"}</strong></span><span><ChevronRight size={17} /></span></button>)}</div></section>
+      <section className="panel history-table-wrap"><div className="table-toolbar"><div className="search-field"><Search size={16} /><input aria-label="Search runs" placeholder="Search simulations" value={query} onChange={(event) => setQuery(event.target.value)} /></div><label className="toolbar-select"><span className="sr-only">Filter by status</span><select aria-label="Filter by status" value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option>All</option><option>Review</option><option>Completed</option><option>Running</option><option>Queued</option></select><ChevronDown size={14} /></label><label className="toolbar-select"><span className="sr-only">Sort run history</span><select aria-label="Sort run history" value={sortOrder} onChange={(event) => setSortOrder(event.target.value as "newest" | "oldest")}><option value="newest">Newest first</option><option value="oldest">Oldest first</option></select><ChevronDown size={14} /></label></div><div className="history-table"><div className="history-head"><span>Simulation</span><span>Status</span><span>Coverage</span><span>Findings</span><span>UX score</span><span /></div>{visibleRuns.map((run) => <button className="history-row" key={run.id} onClick={() => onOpen(run.id)}><span><span className="run-icon"><TestTube2 size={17} /></span><span><strong>{run.name}</strong><small>{run.targetUrl} · {run.createdAt}</small></span></span><span><i className={`status-pill ${run.status.toLowerCase()}`}>{run.status}</i></span><span>{run.personas} personas</span><span>{run.findings} findings</span><span><strong className={`table-score ${run.score > 0 && run.score < 75 ? "risk" : ""}`}>{run.score || "—"}</strong></span><span><ChevronRight size={17} /></span></button>)}{!visibleRuns.length && <div className="empty-table"><Search size={22} /><strong>No simulations match</strong><span>Adjust the search or status filter.</span></div>}</div></section>
+    </div>
+  );
+}
+
+function SearchPanel({ runs, findings, onNavigate, onOpenRun }: { runs: TestRun[]; findings: Finding[]; onNavigate: (view: View) => void; onOpenRun: (id: string) => void }) {
+  const [query, setQuery] = useState("");
+  const normalized = query.trim().toLowerCase();
+  const navResults = navItems.filter((item) => !normalized || item.label.toLowerCase().includes(normalized));
+  const runResults = runs.filter((run) => !normalized || `${run.name} ${run.targetUrl}`.toLowerCase().includes(normalized)).slice(0, 3);
+  const findingResults = findings.filter((finding) => normalized && finding.title.toLowerCase().includes(normalized)).slice(0, 3);
+  return (
+    <div className="utility-popover search-popover" role="dialog" aria-label="Search TraceUX">
+      <div className="popover-search"><Search size={16} /><input autoFocus aria-label="Search workspace" placeholder="Search runs, findings, or pages" value={query} onChange={(event) => setQuery(event.target.value)} /></div>
+      <div className="search-results">
+        {navResults.map((item) => { const Icon = item.icon; return <button key={item.id} onClick={() => onNavigate(item.id)}><span><Icon size={15} /></span><div><strong>{item.label}</strong><small>Workspace page</small></div><ChevronRight size={14} /></button>; })}
+        {runResults.map((run) => <button key={run.id} onClick={() => onOpenRun(run.id)}><span><TestTube2 size={15} /></span><div><strong>{run.name}</strong><small>{run.status} · {run.targetUrl}</small></div><ChevronRight size={14} /></button>)}
+        {findingResults.map((finding) => <button key={finding.id} onClick={() => onNavigate("findings")}><span><AlertTriangle size={15} /></span><div><strong>{finding.title}</strong><small>{finding.severity} · {finding.status}</small></div><ChevronRight size={14} /></button>)}
+        {!navResults.length && !runResults.length && !findingResults.length && <div className="search-empty">No matching workspace items.</div>}
+      </div>
+    </div>
+  );
+}
+
+function NotificationPanel({ findings, onNavigate }: { findings: Finding[]; onNavigate: (view: View) => void }) {
+  const pending = findings.filter((finding) => finding.status === "Needs review").length;
+  return (
+    <div className="utility-popover notification-popover" role="dialog" aria-label="Notifications">
+      <div className="popover-title"><div><p className="eyebrow">Workflow inbox</p><h2>Notifications</h2></div><span>{pending + 1}</span></div>
+      <button onClick={() => onNavigate("findings")}><span className="notification-icon critical"><AlertTriangle size={15} /></span><div><strong>{pending} findings need review</strong><small>Evidence is verified and ready for a human decision.</small></div></button>
+      <button onClick={() => onNavigate("history")}><span className="notification-icon complete"><CheckCircle2 size={15} /></span><div><strong>Latest simulation completed</strong><small>The persistent run record is available in history.</small></div></button>
+    </div>
+  );
+}
+
+function SettingsDialog({ safeMode, evidenceCapture, onClose, onSave }: { safeMode: boolean; evidenceCapture: boolean; onClose: () => void; onSave: (safeMode: boolean, evidenceCapture: boolean) => void }) {
+  const [safe, setSafe] = useState(safeMode);
+  const [evidence, setEvidence] = useState(evidenceCapture);
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="modal-card settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <div className="modal-heading"><div><p className="eyebrow">Workspace controls</p><h2 id="settings-title">Execution settings</h2></div><button className="icon-button" aria-label="Close settings" onClick={onClose}><X size={17} /></button></div>
+        <p>These device preferences control how every new prototype run is presented and reviewed.</p>
+        <label className="setting-row"><span><ShieldCheck size={18} /><span><strong>Safe interaction mode</strong><small>Blocks destructive, purchase, and submission actions.</small></span></span><input type="checkbox" checked={safe} onChange={(event) => setSafe(event.target.checked)} /></label>
+        <label className="setting-row"><span><Eye size={18} /><span><strong>Evidence capture</strong><small>Retains behavior, accessibility, DOM, and console signals.</small></span></span><input type="checkbox" checked={evidence} onChange={(event) => setEvidence(event.target.checked)} /></label>
+        <div className="modal-actions"><button className="button-ghost" onClick={onClose}>Cancel</button><button className="button-primary" onClick={() => onSave(safe, evidence)}>Save settings</button></div>
+      </section>
+    </div>
+  );
+}
+
+function PersonaDialog({ onClose, onCreate }: { onClose: () => void; onCreate: (input: CustomPersonaInput) => Promise<void> }) {
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [traits, setTraits] = useState("careful, mobile-first");
+  const [accessibility, setAccessibility] = useState("");
+  const [patience, setPatience] = useState(55);
+  const [confidence, setConfidence] = useState(50);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await onCreate({ name, description, traits: traits.split(",").map((trait) => trait.trim()).filter(Boolean), accessibility: accessibility || null, patience, confidence });
+    } catch {
+      setError("The persona could not be saved. Check the fields and runtime connection.");
+      setSaving(false);
+    }
+  }
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <form className="modal-card persona-dialog" role="dialog" aria-modal="true" aria-labelledby="persona-title" onSubmit={submit}>
+        <div className="modal-heading"><div><p className="eyebrow">Persona lab</p><h2 id="persona-title">Create behavior policy</h2></div><button type="button" className="icon-button" aria-label="Close persona editor" onClick={onClose}><X size={17} /></button></div>
+        <div className="dialog-field-grid"><label><span>Persona name</span><input required minLength={2} maxLength={60} value={name} onChange={(event) => setName(event.target.value)} placeholder="Trust-sensitive subscriber" /></label><label><span>Behavior summary</span><textarea required minLength={8} maxLength={240} rows={3} value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Looks for cancellation clarity before committing." /></label><label><span>Traits, comma separated</span><input required value={traits} onChange={(event) => setTraits(event.target.value)} /></label><label><span>Accessibility need (optional)</span><input value={accessibility} onChange={(event) => setAccessibility(event.target.value)} placeholder="Reduced motion" /></label></div>
+        <div className="range-grid"><label><span>Patience <strong>{patience}%</strong></span><input type="range" min="0" max="100" value={patience} onChange={(event) => setPatience(Number(event.target.value))} /></label><label><span>Confidence <strong>{confidence}%</strong></span><input type="range" min="0" max="100" value={confidence} onChange={(event) => setConfidence(Number(event.target.value))} /></label></div>
+        {error && <p className="dialog-error" role="alert">{error}</p>}
+        <div className="modal-actions"><button type="button" className="button-ghost" onClick={onClose}>Cancel</button><button className="button-primary" disabled={saving}>{saving ? <Activity className="spin" size={16} /> : <Plus size={16} />}Save persona</button></div>
+      </form>
+    </div>
+  );
+}
+
+function TicketDialog({ tickets, onClose, onExport }: { tickets: TicketDraft[]; onClose: () => void; onExport: () => void }) {
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="modal-card ticket-dialog" role="dialog" aria-modal="true" aria-labelledby="ticket-title">
+        <div className="modal-heading"><div><p className="eyebrow">Delivery handoff</p><h2 id="ticket-title">Human-approved ticket drafts</h2></div><button className="icon-button" aria-label="Close ticket drafts" onClick={onClose}><X size={17} /></button></div>
+        <p>Drafts are ready for review. Export the integration payload before sending them to an external work tracker.</p>
+        <div className="ticket-list">{tickets.map((ticket) => <article key={ticket.id}><span><Zap size={15} /></span><div><small>{ticket.id} · {ticket.severity}</small><strong>{ticket.title}</strong></div><i>{ticket.status}</i></article>)}</div>
+        <div className="modal-actions"><button className="button-ghost" onClick={onClose}>Close</button><button className="button-primary" onClick={onExport}><FileText size={16} />Export integration JSON</button></div>
+      </section>
     </div>
   );
 }

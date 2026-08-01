@@ -1,6 +1,7 @@
 import { desc } from "drizzle-orm";
-import { getDb } from "../../../db";
-import { prototypeRuns } from "../../../db/schema";
+import { getDb } from "@/db";
+import { prototypeRuns } from "@/db/schema";
+import { serializeRun } from "../workflow";
 
 export async function GET() {
   try {
@@ -9,9 +10,9 @@ export async function GET() {
       .from(prototypeRuns)
       .orderBy(desc(prototypeRuns.createdAt))
       .limit(20);
-    return Response.json({ runs: rows });
+    return Response.json(rows.map(serializeRun));
   } catch {
-    return Response.json({ runs: [] });
+    return Response.json([]);
   }
 }
 
@@ -20,10 +21,11 @@ export async function POST(request: Request) {
     projectName?: string;
     targetUrl?: string;
     goal?: string;
+    successCriteria?: string;
     personaIds?: string[];
   };
 
-  if (!payload.projectName || !payload.targetUrl || !payload.goal || !payload.personaIds?.length) {
+  if (!payload.projectName || !payload.targetUrl || !payload.goal || !payload.successCriteria || !payload.personaIds?.length) {
     return Response.json({ error: "Complete the scenario and choose at least one persona." }, { status: 400 });
   }
 
@@ -32,14 +34,15 @@ export async function POST(request: Request) {
     projectName: payload.projectName,
     targetUrl: payload.targetUrl,
     goal: payload.goal,
+    successCriteria: payload.successCriteria,
     personaIds: JSON.stringify(payload.personaIds),
     status: "QUEUED",
   };
 
   try {
     const [created] = await getDb().insert(prototypeRuns).values(run).returning();
-    return Response.json(created, { status: 201 });
+    return Response.json(serializeRun(created), { status: 201 });
   } catch {
-    return Response.json({ ...run, createdAt: new Date().toISOString() }, { status: 201 });
+    return Response.json({ error: "Persistent run storage is temporarily unavailable." }, { status: 503 });
   }
 }

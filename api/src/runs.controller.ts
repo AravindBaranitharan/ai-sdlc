@@ -1,6 +1,6 @@
-import { Body, Controller, Get, MessageEvent, Param, Post, Sse } from "@nestjs/common";
+import { Body, Controller, Get, MessageEvent, Param, Patch, Post, Sse } from "@nestjs/common";
 import { Observable } from "rxjs";
-import { CreateRunDto } from "./run.dto";
+import { CreatePersonaDto, CreateRunDto, ReviewFindingDto } from "./run.dto";
 import { RunsService } from "./runs.service";
 
 @Controller()
@@ -22,6 +22,11 @@ export class RunsController {
     return this.runsService.personas();
   }
 
+  @Post("personas")
+  createPersona(@Body() dto: CreatePersonaDto) {
+    return this.runsService.createPersona(dto);
+  }
+
   @Get("runs")
   runs() {
     return this.runsService.runs();
@@ -40,6 +45,20 @@ export class RunsController {
   @Post("runs/:id/start")
   start(@Param("id") id: string) {
     return this.runsService.start(id);
+  }
+
+  @Patch("runs/:runId/findings/:findingId")
+  reviewFinding(
+    @Param("runId") runId: string,
+    @Param("findingId") findingId: string,
+    @Body() dto: ReviewFindingDto,
+  ) {
+    return this.runsService.reviewFinding(runId, findingId, dto);
+  }
+
+  @Post("runs/:id/tickets")
+  createTickets(@Param("id") id: string) {
+    return this.runsService.createTickets(id);
   }
 
   @Sse("runs/:id/events")
