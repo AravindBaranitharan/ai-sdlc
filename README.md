@@ -19,7 +19,7 @@ TraceUX is an end-to-end hackathon prototype for agentic UX testing. It turns a 
 - D1 and Drizzle: persistent hosted-demo run records
 - Agent pipeline: orchestrator → planner → persona → browser → observer → analyst → verifier → reporter → human review
 
-The prototype uses a deterministic AI-compatible runtime by default, so the complete demo works without an external model key. The agent stages expose typed boundaries where a production LLM and real Playwright executor can be connected without changing the UI contract.
+The prototype uses the OpenAI Responses API with Structured Outputs when `AI_PROVIDER=openai` and `OPENAI_API_KEY` are configured. It falls back to a deterministic engine when the model is unavailable, so the demo remains usable without exposing a key to the browser. A real Playwright executor can be connected at the existing browser-agent boundary without changing the UI contract.
 
 ## Local setup
 

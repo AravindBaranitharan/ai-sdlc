@@ -108,6 +108,13 @@ interface TicketDraft {
   createdAt?: string;
 }
 
+interface AiRuntime {
+  provider: "openai" | "demo";
+  model: string | null;
+  configured: boolean;
+  liveBrowser: boolean;
+}
+
 type CustomPersonaInput = Omit<Persona, "id">;
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? (process.env.NODE_ENV === "development" ? "http://localhost:4000/api" : "/api");
@@ -385,6 +392,7 @@ export function ProductShell() {
   const [progress, setProgress] = useState(100);
   const [runStatus, setRunStatus] = useState("Ready for review");
   const [runtime, setRuntime] = useState<"connected" | "demo">("demo");
+  const [aiRuntime, setAiRuntime] = useState<AiRuntime>({ provider: "demo", model: null, configured: false, liveBrowser: false });
   const [isLaunching, setIsLaunching] = useState(false);
   const [toast, setToast] = useState("");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -411,9 +419,11 @@ export function ProductShell() {
           fetch(`${API_URL}/runs`),
         ]);
         if (!healthResponse.ok || !personaResponse.ok) return;
+        const healthData = (await healthResponse.json()) as { ai?: AiRuntime };
         const personaData = (await personaResponse.json()) as Persona[];
         setPersonas(personaData);
         setRuntime("connected");
+        if (healthData.ai) setAiRuntime(healthData.ai);
         if (runsResponse.ok) {
           const remoteRuns = (await runsResponse.json()) as Array<Record<string, unknown>>;
           if (remoteRuns.length) {
@@ -749,8 +759,8 @@ export function ProductShell() {
         </div>
 
         <div className="workspace-picker">
-          <span className="workspace-avatar">NC</span>
-          <span><small>Workspace</small>Nova Commerce</span>
+          <span className="workspace-avatar">HX</span>
+          <span><small>Workspace</small>Hexaware</span>
           <ChevronDown size={15} />
         </div>
 
@@ -770,13 +780,13 @@ export function ProductShell() {
 
         <div className="sidebar-spacer" />
         <div className="runtime-card">
-          <div className="runtime-title"><span className={`runtime-dot ${runtime}`} />{runtime === "connected" ? "Agent runtime online" : "Demo runtime ready"}</div>
-          <p>{runtime === "connected" ? "Persistent workflow · review gated" : "Runtime connection required"}</p>
+          <div className="runtime-title"><span className={`runtime-dot ${runtime}`} />{runtime === "connected" ? (aiRuntime.provider === "openai" ? "OpenAI agent runtime" : "Agent runtime online") : "Demo runtime ready"}</div>
+          <p>{runtime === "connected" ? (aiRuntime.provider === "openai" ? `${aiRuntime.model ?? "OpenAI"} · review gated` : "Persistent workflow · review gated") : "Runtime connection required"}</p>
         </div>
         <button className="nav-settings" onClick={() => setSettingsOpen(true)}><Settings size={18} />Settings</button>
         <div className="profile-row">
-          <span className="profile-avatar">AK</span>
-          <span><strong>Aravind Kumar</strong><small>Product workspace</small></span>
+          <span className="profile-avatar">KV</span>
+          <span><strong>Kaviya</strong><small>Product workspace</small></span>
           <ChevronRight size={16} />
         </div>
       </aside>
@@ -786,7 +796,7 @@ export function ProductShell() {
       <main className="main-area">
         <header className="topbar">
           <button className="mobile-menu" onClick={() => setMobileNav(true)} aria-label="Open navigation"><Menu size={20} /></button>
-          <div className="breadcrumbs"><span>Nova Commerce</span><ChevronRight size={14} /><strong>{navItems.find((item) => item.id === view)?.label}</strong></div>
+          <div className="breadcrumbs"><span>Hexaware</span><ChevronRight size={14} /><strong>{navItems.find((item) => item.id === view)?.label}</strong></div>
           <div className="top-actions">
             <button className="icon-button" aria-label="Search" aria-expanded={searchOpen} onClick={() => { setSearchOpen((open) => !open); setNotificationOpen(false); }}><Search size={18} /></button>
             <button className="icon-button notification-button" aria-label="Notifications" aria-expanded={notificationOpen} onClick={() => { setNotificationOpen((open) => !open); setSearchOpen(false); }}><MessageSquareText size={18} /><span /></button>
@@ -834,6 +844,7 @@ export function ProductShell() {
               findings={findings}
               activeEvent={activeEvent}
               runtime={runtime}
+              aiRuntime={aiRuntime}
               onViewFindings={() => navigate("findings")}
               onNewRun={prepareNewRun}
             />
@@ -1018,7 +1029,7 @@ function ScenarioView({ projectName, setProjectName, targetUrl, setTargetUrl, go
   );
 }
 
-function LiveRunView({ projectName, targetUrl, personaCount, progress, status, events, findings, activeEvent, runtime, onViewFindings, onNewRun }: { projectName: string; targetUrl: string; personaCount: number; progress: number; status: string; events: AgentEvent[]; findings: Finding[]; activeEvent?: AgentEvent; runtime: "connected" | "demo"; onViewFindings: () => void; onNewRun: () => void }) {
+function LiveRunView({ projectName, targetUrl, personaCount, progress, status, events, findings, activeEvent, runtime, aiRuntime, onViewFindings, onNewRun }: { projectName: string; targetUrl: string; personaCount: number; progress: number; status: string; events: AgentEvent[]; findings: Finding[]; activeEvent?: AgentEvent; runtime: "connected" | "demo"; aiRuntime: AiRuntime; onViewFindings: () => void; onNewRun: () => void }) {
   const isComplete = progress === 100;
   return (
     <div className="view-stack live-view">
@@ -1026,7 +1037,7 @@ function LiveRunView({ projectName, targetUrl, personaCount, progress, status, e
       <section className="run-progress-panel panel">
         <div className="run-progress-copy"><span>{isComplete ? <CheckCircle2 size={18} /> : <Activity size={18} />}</span><div><strong>{isComplete ? "Simulation complete" : status}</strong><small>{activeEvent?.detail ?? "All verified evidence is ready for human review."}</small></div></div>
         <div className="progress-wrap"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><strong>{progress}%</strong></div>
-        <span className="runtime-chip"><CircleDot size={14} />{runtime === "connected" ? "Persistent agent runtime" : "Runtime reconnecting"}</span>
+        <span className="runtime-chip"><CircleDot size={14} />{runtime === "connected" ? (aiRuntime.provider === "openai" ? `OpenAI · ${aiRuntime.model ?? "connected"}` : "Persistent agent runtime") : "Runtime reconnecting"}</span>
       </section>
       <section className="command-grid">
         <BrowserPreview progress={progress} targetUrl={targetUrl} />

@@ -3,6 +3,7 @@ import { FindingSeverity, Prisma, RunStatus } from "@prisma/client";
 import { Observable, ReplaySubject } from "rxjs";
 import { PrismaService } from "./prisma.service";
 import { randomUUID } from "node:crypto";
+import { OpenAiUxService } from "./openai-ux.service";
 import { CreatePersonaDto, CreateRunDto, ReviewFindingDto } from "./run.dto";
 import { agentStages } from "./run.types";
 
@@ -64,11 +65,19 @@ const demoFindings = [
 export class RunsService {
   private readonly streams = new Map<string, ReplaySubject<MessageEvent>>();
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly openAiUx: OpenAiUxService,
+  ) {}
 
   async health() {
     await this.prisma.$queryRaw`SELECT 1`;
-    return { status: "ok", runtime: "NestJS", database: "PostgreSQL" };
+    return {
+      status: "ok",
+      runtime: "NestJS",
+      database: "PostgreSQL",
+      ai: this.openAiUx.status(),
+    };
   }
 
   async overview() {
@@ -219,8 +228,15 @@ export class RunsService {
         stream.next({ type: stage.kind, data: event });
       }
 
+      const runContext = await this.run(id);
+      const personas = await this.prisma.persona.findMany({
+        where: { id: { in: runContext.personaIds } },
+      });
+      const aiFindings = await this.openAiUx.generateFindings(runContext, personas);
+      const findings = aiFindings ?? demoFindings;
+
       await this.prisma.finding.createMany({
-        data: demoFindings.map((finding) => ({
+        data: findings.map((finding) => ({
           ...finding,
           evidence: finding.evidence as Prisma.InputJsonValue,
           runId: id,
@@ -233,7 +249,7 @@ export class RunsService {
           progress: 100,
           uxScore: 72,
           completionRate: 76,
-          frictionCount: demoFindings.length,
+          frictionCount: findings.length,
           completedAt: new Date(),
         },
         include: { project: true, findings: true, events: { orderBy: { createdAt: "asc" } } },
