@@ -21,29 +21,23 @@ TraceUX is an end-to-end hackathon prototype for agentic UX testing. It turns a 
 
 The prototype uses the OpenAI Responses API with Structured Outputs when `AI_PROVIDER=openai` and `OPENAI_API_KEY` are configured. It falls back to a deterministic engine when the model is unavailable, so the demo remains usable without exposing a key to the browser. A real Playwright executor can be connected at the existing browser-agent boundary without changing the UI contract.
 
-## Local setup
+## One-command local setup
 
-Requirements: Node.js 22+, PostgreSQL, and Redis. PostgreSQL should contain a `traceux` database and user matching `api/.env.example`.
-
-```bash
-npm install
-npm --prefix api install
-npm --prefix api run prisma:generate
-npm --prefix api run prisma:migrate -- --name init
-npm --prefix api run prisma:seed
-```
-
-Run the application in two terminals:
+Install Node.js 22+ and Docker Desktop. Then clone the project and run:
 
 ```bash
-npm run dev
+npm run traceux
 ```
 
-```bash
-npm run dev:api
+That single command installs dependencies, starts PostgreSQL, applies migrations, adds the demo personas, and launches both the web application and NestJS API. Open `http://localhost:3000`.
+
+The first run creates a git-ignored `.env` file automatically. The product works immediately with its safe fallback engine. For live OpenAI analysis, add a fresh key to that one file and restart the command:
+
+```dotenv
+OPENAI_API_KEY=your_new_key_here
 ```
 
-Open `http://localhost:3000`. The API health endpoint is available at `http://localhost:4000/api/health`.
+Press `Ctrl+C` to stop the application. PostgreSQL remains available for the next launch; use `docker stop traceux-postgres` when you want to stop it too.
 
 ## Validation
 

@@ -6,6 +6,7 @@
     "node": ">=22.13.0"
   },
   "scripts": {
+    "traceux": "node scripts/traceux.mjs",
     "dev": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev",
     "dev:api": "npm --prefix api run dev",
     "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
