@@ -29,6 +29,8 @@ Install Node.js 22+ and Docker Desktop. Then clone the project and run:
 npm run traceux
 ```
 
+The launcher is compatible with Windows, macOS, and Linux. `npm run traceUX` is also accepted on Windows if that capitalization is used.
+
 That single command installs dependencies, starts PostgreSQL, applies migrations, adds the demo personas, and launches both the web application and NestJS API. Open `http://localhost:3000`.
 
 The first run creates a git-ignored `.env` file automatically. The product works immediately with its safe fallback engine. For live OpenAI analysis, add a fresh key to that one file and restart the command:
@@ -36,6 +38,8 @@ The first run creates a git-ignored `.env` file automatically. The product works
 ```dotenv
 OPENAI_API_KEY=your_new_key_here
 ```
+
+Replace the entire placeholder with the new key. Do not add backslashes before underscores, and do not commit the `.env` file.
 
 Press `Ctrl+C` to stop the application. PostgreSQL remains available for the next launch; use `docker stop traceux-postgres` when you want to stop it too.
 
