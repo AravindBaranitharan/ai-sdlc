@@ -49,11 +49,14 @@ async function main() {
 
   await prisma.project.upsert({
     where: { id: "demo-storefront" },
-    update: {},
+    update: {
+      name: "Hexaware Website",
+      targetUrl: "https://example.com",
+    },
     create: {
       id: "demo-storefront",
-      name: "Nova Commerce",
-      targetUrl: "https://demo.traceux.app/checkout",
+      name: "Hexaware Website",
+      targetUrl: "https://example.com",
     },
   });
 }

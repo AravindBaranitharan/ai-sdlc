@@ -3,14 +3,15 @@ import { FindingSeverity, Prisma, RunStatus } from "@prisma/client";
 import { Observable, ReplaySubject } from "rxjs";
 import { PrismaService } from "./prisma.service";
 import { randomUUID } from "node:crypto";
-import { OpenAiUxService } from "./openai-ux.service";
+import { AiFinding, OpenAiUxService } from "./openai-ux.service";
+import { BrowserObservation, LiveBrowserService } from "./live-browser.service";
 import { CreatePersonaDto, CreateRunDto, ReviewFindingDto } from "./run.dto";
 import { agentStages } from "./run.types";
 
 const wait = (milliseconds: number) =>
   new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-const demoFindings = [
+const demoFindings: AiFinding[] = [
   {
     title: "Delivery cost appears too late",
     summary:
@@ -61,12 +62,174 @@ const demoFindings = [
   },
 ];
 
+function buildObservedFindings(observation: BrowserObservation, persona: string) {
+  const { metrics, selectors } = observation;
+  const screenshot = observation.screenshot;
+  const findings: AiFinding[] = [];
+  const add = (finding: AiFinding) => findings.push(finding);
+
+  if (metrics.unlabeledControls > 0) {
+    add({
+      title: `${metrics.unlabeledControls} visible control${metrics.unlabeledControls === 1 ? " lacks" : "s lack"} an accessible name`,
+      summary: "The read-only DOM scan found visible interactive controls without a programmatic label.",
+      severity: FindingSeverity.CRITICAL,
+      confidence: 99,
+      persona: "Keyboard Navigator",
+      journeyStep: "Initial viewport · Accessibility",
+      evidence: {
+        signal: `Observed: ${metrics.unlabeledControls} unlabeled visible controls`,
+        selector: selectors.unlabeledControls[0] ?? "viewport",
+        screenshot,
+      },
+      recommendation: "Give each control visible text or an accessible name using a native label or aria-label.",
+    });
+  }
+
+  if (metrics.missingAltImages > 0) {
+    add({
+      title: `${metrics.missingAltImages} visible image${metrics.missingAltImages === 1 ? " is" : "s are"} missing alt text`,
+      summary: "The captured page contains visible images without an alt attribute.",
+      severity: FindingSeverity.HIGH,
+      confidence: 99,
+      persona,
+      journeyStep: "Initial viewport · Content",
+      evidence: {
+        signal: `Observed: ${metrics.missingAltImages} visible images without alt attributes`,
+        selector: selectors.missingAltImages[0] ?? "viewport",
+        screenshot,
+      },
+      recommendation: "Add concise alternative text for meaningful images and an empty alt value for decorative images.",
+    });
+  }
+
+  if (metrics.consoleErrors > 0) {
+    add({
+      title: `${metrics.consoleErrors} browser console error${metrics.consoleErrors === 1 ? " was" : "s were"} captured`,
+      summary: observation.consoleMessages[0] ?? "The page emitted an error while loading in Chromium.",
+      severity: FindingSeverity.HIGH,
+      confidence: 98,
+      persona,
+      journeyStep: "Page load · Runtime",
+      evidence: {
+        signal: `Observed: ${metrics.consoleErrors} console errors during page load`,
+        selector: "viewport",
+        screenshot,
+      },
+      recommendation: "Resolve the captured runtime error and repeat this browser run to confirm a clean console.",
+    });
+  }
+
+  if (metrics.horizontalOverflow) {
+    add({
+      title: "Content overflows the captured desktop viewport",
+      summary: "The document width exceeds the 1280-pixel browser viewport used for this run.",
+      severity: FindingSeverity.HIGH,
+      confidence: 98,
+      persona,
+      journeyStep: "Initial viewport · Responsive layout",
+      evidence: {
+        signal: "Observed: document width exceeds the 1280px viewport",
+        selector: "viewport",
+        screenshot,
+      },
+      recommendation: "Identify the overflowing element, constrain its width, and verify the page at desktop and mobile breakpoints.",
+    });
+  }
+
+  if (metrics.h1Count !== 1) {
+    add({
+      title: metrics.h1Count === 0 ? "The captured page has no primary heading" : "The captured page has multiple primary headings",
+      summary: `The DOM scan found ${metrics.h1Count} H1 elements on the loaded page.`,
+      severity: FindingSeverity.MEDIUM,
+      confidence: 99,
+      persona,
+      journeyStep: "Initial viewport · Information structure",
+      evidence: {
+        signal: `Observed: ${metrics.h1Count} H1 elements in the DOM`,
+        selector: selectors.headings[0] ?? "viewport",
+        screenshot,
+      },
+      recommendation: "Use one descriptive page-level H1 and nest subsequent headings in a logical hierarchy.",
+    });
+  }
+
+  if (observation.loadTimeMs > 3_000) {
+    add({
+      title: "Initial page load exceeded three seconds",
+      summary: `The read-only Chromium session reached its captured state in ${observation.loadTimeMs}ms.`,
+      severity: FindingSeverity.MEDIUM,
+      confidence: 92,
+      persona: "Impatient Shopper",
+      journeyStep: "Page load · Performance",
+      evidence: {
+        signal: `Observed: ${observation.loadTimeMs}ms initial capture time`,
+        selector: "viewport",
+        screenshot,
+      },
+      recommendation: "Profile the critical rendering path, optimize blocking assets, and retest under representative network conditions.",
+    });
+  }
+
+  const interactiveCount = metrics.links + metrics.buttons + metrics.formControls;
+  const baselineFindings = [
+    {
+      title: "Keyboard traversal baseline captured",
+      summary: `The browser recorded ${observation.focusSequence.length} unique focus stops without submitting forms or activating controls.`,
+      severity: FindingSeverity.LOW,
+      confidence: 90,
+      persona: "Keyboard Navigator",
+      journeyStep: "Initial viewport · Keyboard",
+      evidence: {
+        signal: `Observed: ${observation.focusSequence.length} unique focus stops in the first eight Tab presses`,
+        selector: selectors.interactive[0] ?? "viewport",
+        screenshot,
+      },
+      recommendation: "Review the captured focus sequence against the visual reading order, then test the complete task with keyboard-only input.",
+    },
+    {
+      title: "Initial interaction surface requires journey validation",
+      summary: `The loaded page exposes ${interactiveCount} links, buttons, and form controls in the captured document.`,
+      severity: FindingSeverity.LOW,
+      confidence: 88,
+      persona,
+      journeyStep: "Initial viewport · Interaction",
+      evidence: {
+        signal: `Observed: ${metrics.links} links, ${metrics.buttons} buttons, and ${metrics.formControls} form controls`,
+        selector: selectors.interactive[0] ?? "viewport",
+        screenshot,
+      },
+      recommendation: "Confirm that the primary action is visually dominant and that the control sequence supports the stated journey goal.",
+    },
+    {
+      title: "Real browser capture completed successfully",
+      summary: `${observation.title || "The target page"} returned HTTP ${observation.responseStatus || "unknown"} at ${observation.finalUrl}.`,
+      severity: FindingSeverity.LOW,
+      confidence: 100,
+      persona,
+      journeyStep: "Page load · Verification",
+      evidence: {
+        signal: `Observed: HTTP ${observation.responseStatus || "unknown"} captured in ${observation.loadTimeMs}ms`,
+        selector: "viewport",
+        screenshot,
+      },
+      recommendation: "Use this capture as the reproducible baseline for deeper task-specific interactions in a controlled test environment.",
+    },
+  ];
+
+  for (const finding of baselineFindings) {
+    if (findings.length >= 3) break;
+    add(finding);
+  }
+  return findings.slice(0, 3);
+}
+
 @Injectable()
 export class RunsService {
   private readonly streams = new Map<string, ReplaySubject<MessageEvent>>();
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly liveBrowser: LiveBrowserService,
     private readonly openAiUx: OpenAiUxService,
   ) {}
 
@@ -216,24 +379,58 @@ export class RunsService {
 
   private async execute(id: string, stream: ReplaySubject<MessageEvent>) {
     try {
-      for (const stage of agentStages) {
-        await wait(520);
-        const event = await this.prisma.runEvent.create({
-          data: { runId: id, ...stage },
-        });
-        await this.prisma.testRun.update({
-          where: { id },
-          data: { progress: stage.progress },
-        });
-        stream.next({ type: stage.kind, data: event });
-      }
-
       const runContext = await this.run(id);
       const personas = await this.prisma.persona.findMany({
         where: { id: { in: runContext.personaIds } },
       });
-      const aiFindings = await this.openAiUx.generateFindings(runContext, personas);
-      const findings = aiFindings ?? demoFindings;
+      let browserObservation: BrowserObservation | null = null;
+
+      for (const stage of agentStages) {
+        let stageData = stage;
+        if (stage.agent === "browser" && this.liveBrowser.enabled()) {
+          browserObservation = await this.liveBrowser.capture(runContext.targetUrl);
+          const { screenshot, ...browserEvidence } = browserObservation;
+          await this.prisma.testRun.update({
+            where: { id },
+            data: {
+              browserMode: "live",
+              browserFinalUrl: browserObservation.finalUrl,
+              browserTitle: browserObservation.title,
+              browserScreenshot: screenshot,
+              browserEvidence: browserEvidence as unknown as Prisma.InputJsonValue,
+              browserCapturedAt: new Date(browserObservation.capturedAt),
+            },
+          });
+          stream.next({ type: "browser-capture", data: browserObservation });
+          stageData = {
+            ...stage,
+            title: "Live target captured in Chromium",
+            detail: `Loaded ${browserObservation.finalUrl} in read-only safe mode and captured a real screenshot, DOM, accessibility, focus, network, and console signals.`,
+          };
+        }
+        await wait(520);
+        const event = await this.prisma.runEvent.create({
+          data: { runId: id, ...stageData },
+        });
+        await this.prisma.testRun.update({
+          where: { id },
+          data: { progress: stageData.progress },
+        });
+        stream.next({ type: stageData.kind, data: event });
+      }
+
+      const aiFindings = await this.openAiUx.generateFindings(runContext, personas, browserObservation);
+      const findings = aiFindings ?? (browserObservation
+        ? buildObservedFindings(browserObservation, personas[0]?.name ?? "Selected persona")
+        : demoFindings);
+      const observedPenalty = browserObservation
+        ? Math.min(55,
+            browserObservation.metrics.unlabeledControls * 8 +
+            browserObservation.metrics.missingAltImages * 3 +
+            browserObservation.metrics.consoleErrors * 4 +
+            (browserObservation.metrics.horizontalOverflow ? 12 : 0) +
+            (browserObservation.loadTimeMs > 3_000 ? 8 : 0))
+        : 28;
 
       await this.prisma.finding.createMany({
         data: findings.map((finding) => ({
@@ -247,8 +444,8 @@ export class RunsService {
         data: {
           status: RunStatus.REVIEW,
           progress: 100,
-          uxScore: 72,
-          completionRate: 76,
+          uxScore: Math.max(40, 100 - observedPenalty),
+          completionRate: browserObservation?.responseStatus && browserObservation.responseStatus < 400 ? 100 : 76,
           frictionCount: findings.length,
           completedAt: new Date(),
         },
@@ -257,11 +454,24 @@ export class RunsService {
       stream.next({ type: "complete", data: completed });
       stream.complete();
     } catch (error) {
+      const message = error instanceof Error ? error.message : "The browser run failed.";
+      const failureEvent = await this.prisma.runEvent.create({
+        data: {
+          runId: id,
+          agent: "browser",
+          title: "Live browser capture failed",
+          detail: message.slice(0, 500),
+          progress: 48,
+          kind: "guardrail",
+        },
+      });
       await this.prisma.testRun.update({
         where: { id },
         data: { status: RunStatus.FAILED },
       });
-      stream.error(error);
+      stream.next({ type: "guardrail", data: failureEvent });
+      stream.next({ type: "failed", data: { message } });
+      stream.complete();
     }
   }
 }

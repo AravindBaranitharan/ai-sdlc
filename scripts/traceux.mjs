@@ -63,6 +63,8 @@ if (!commandWorks("docker", ["info"])) {
 console.log("\n[1/5] Installing application dependencies…");
 run("npm", ["ci", "--no-audit", "--no-fund"]);
 run("npm", ["--prefix", "api", "ci", "--no-audit", "--no-fund"]);
+console.log("Installing the isolated Chromium browser (first launch only)…");
+run("npm", ["--prefix", "api", "exec", "--", "playwright", "install", "chromium"]);
 
 console.log("\n[2/5] Starting PostgreSQL…");
 if (commandWorks("docker", ["container", "inspect", "traceux-postgres"])) {

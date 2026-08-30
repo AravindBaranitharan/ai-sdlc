@@ -115,9 +115,40 @@ interface AiRuntime {
   liveBrowser: boolean;
 }
 
+interface BrowserCapture {
+  mode: "live";
+  requestedUrl: string;
+  finalUrl: string;
+  title: string;
+  screenshot: string;
+  capturedAt: string;
+  responseStatus: number;
+  loadTimeMs: number;
+  viewport: { width: number; height: number };
+  metrics: {
+    links: number;
+    buttons: number;
+    formControls: number;
+    images: number;
+    missingAltImages: number;
+    unlabeledControls: number;
+    headings: number;
+    h1Count: number;
+    consoleErrors: number;
+    failedRequests: number;
+    blockedMutations: number;
+    horizontalOverflow: boolean;
+  };
+  focusSequence: string[];
+  consoleMessages: string[];
+}
+
 type CustomPersonaInput = Omit<Persona, "id">;
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? (process.env.NODE_ENV === "development" ? "http://localhost:4000/api" : "/api");
+const API_URL = process.env.NEXT_PUBLIC_API_URL
+  ?? (typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname)
+    ? "http://localhost:4000/api"
+    : "/api");
 
 const personaSeeds: Persona[] = [
   {
@@ -361,6 +392,40 @@ function normalizeRun(raw: Record<string, unknown>): TestRun {
   };
 }
 
+function normalizeBrowserCapture(raw: Record<string, unknown>): BrowserCapture | null {
+  const evidence = raw.browserEvidence as Partial<BrowserCapture> | undefined;
+  const screenshot = String(raw.browserScreenshot ?? evidence?.screenshot ?? "");
+  if (!screenshot) return null;
+  const metrics = evidence?.metrics as BrowserCapture["metrics"] | undefined;
+  return {
+    mode: "live",
+    requestedUrl: String(evidence?.requestedUrl ?? raw.targetUrl ?? ""),
+    finalUrl: String(raw.browserFinalUrl ?? evidence?.finalUrl ?? raw.targetUrl ?? ""),
+    title: String(raw.browserTitle ?? evidence?.title ?? "Captured target"),
+    screenshot,
+    capturedAt: String(raw.browserCapturedAt ?? evidence?.capturedAt ?? ""),
+    responseStatus: Number(evidence?.responseStatus ?? 0),
+    loadTimeMs: Number(evidence?.loadTimeMs ?? 0),
+    viewport: evidence?.viewport ?? { width: 1280, height: 800 },
+    metrics: metrics ?? {
+      links: 0,
+      buttons: 0,
+      formControls: 0,
+      images: 0,
+      missingAltImages: 0,
+      unlabeledControls: 0,
+      headings: 0,
+      h1Count: 0,
+      consoleErrors: 0,
+      failedRequests: 0,
+      blockedMutations: 0,
+      horizontalOverflow: false,
+    },
+    focusSequence: evidence?.focusSequence ?? [],
+    consoleMessages: evidence?.consoleMessages ?? [],
+  };
+}
+
 function downloadText(filename: string, textContent: string, type: string) {
   const url = URL.createObjectURL(new Blob([textContent], { type }));
   const anchor = document.createElement("a");
@@ -393,6 +458,7 @@ export function ProductShell() {
   const [runStatus, setRunStatus] = useState("Ready for review");
   const [runtime, setRuntime] = useState<"connected" | "demo">("demo");
   const [aiRuntime, setAiRuntime] = useState<AiRuntime>({ provider: "demo", model: null, configured: false, liveBrowser: false });
+  const [browserCapture, setBrowserCapture] = useState<BrowserCapture | null>(null);
   const [isLaunching, setIsLaunching] = useState(false);
   const [toast, setToast] = useState("");
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
@@ -404,10 +470,10 @@ export function ProductShell() {
   const [ticketsOpen, setTicketsOpen] = useState(false);
   const [safeMode, setSafeMode] = useState(true);
   const [evidenceCapture, setEvidenceCapture] = useState(true);
-  const [projectName, setProjectName] = useState("Nova Commerce");
-  const [targetUrl, setTargetUrl] = useState("https://demo.traceux.app/checkout");
-  const [goal, setGoal] = useState("Find anything that prevents a first-time customer from completing checkout confidently.");
-  const [successCriteria, setSuccessCriteria] = useState("Order confirmation is visible and the final price matches the cart.");
+  const [projectName, setProjectName] = useState("Hexaware Website");
+  const [targetUrl, setTargetUrl] = useState("https://example.com");
+  const [goal, setGoal] = useState("Identify accessibility and usability risks on the initial customer journey.");
+  const [successCriteria, setSuccessCriteria] = useState("The public page loads successfully with a clear structure and accessible controls.");
   const eventSourceRef = useRef<EventSource | null>(null);
 
   useEffect(() => {
@@ -427,10 +493,21 @@ export function ProductShell() {
         if (runsResponse.ok) {
           const remoteRuns = (await runsResponse.json()) as Array<Record<string, unknown>>;
           if (remoteRuns.length) {
-            setRuns((current) => [
-              ...remoteRuns.slice(0, 8).map(normalizeRun),
-              ...current,
-            ].filter((run, index, all) => all.findIndex((candidate) => candidate.id === run.id) === index).slice(0, 10));
+            setRuns(remoteRuns.slice(0, 10).map(normalizeRun));
+            const latest = remoteRuns.find((run) => Array.isArray(run.findings) && run.findings.length > 0) ?? remoteRuns[0];
+            setActiveRunId(String(latest.id));
+            setProjectName(String((latest.project as { name?: string } | undefined)?.name ?? latest.projectName ?? "UX simulation"));
+            setTargetUrl(String(latest.targetUrl ?? ""));
+            setGoal(String(latest.goal ?? "Behavior simulation"));
+            setSuccessCriteria(String(latest.successCriteria ?? "The defined journey completes successfully."));
+            if (Array.isArray(latest.personaIds)) setSelectedPersonas(latest.personaIds.map(String));
+            setEvents(Array.isArray(latest.events) ? (latest.events as Array<Record<string, unknown>>).map((event) => ({
+              id: String(event.id), agent: String(event.agent), title: String(event.title), detail: String(event.detail), progress: Number(event.progress), kind: String(event.kind), createdAt: event.createdAt ? String(event.createdAt) : undefined,
+            })) : []);
+            setFindings(Array.isArray(latest.findings) ? (latest.findings as Array<Record<string, unknown>>).map(normalizeFinding) : []);
+            setBrowserCapture(normalizeBrowserCapture(latest));
+            setProgress(Number(latest.progress ?? 0));
+            setRunStatus(String(latest.status) === "RUNNING" ? "Agents working" : "Ready for review");
           }
         }
       } catch {
@@ -503,13 +580,27 @@ export function ProductShell() {
     });
     source.addEventListener("complete", (event) => {
       const message = event as MessageEvent<string>;
-      const run = JSON.parse(message.data) as { findings?: Array<Record<string, unknown>> };
+      const run = JSON.parse(message.data) as Record<string, unknown> & { findings?: Array<Record<string, unknown>> };
       setFindings(run.findings?.map(normalizeFinding) ?? findingSeeds);
+      setBrowserCapture(normalizeBrowserCapture(run));
       setProgress(100);
       setRunStatus("Ready for review");
       setIsLaunching(false);
       setToast("Simulation complete — three verified findings are ready.");
       setRuns((current) => current.map((item) => item.id === id ? { ...item, status: "Review", score: 72, findings: run.findings?.length ?? 3 } : item));
+      source.close();
+    });
+    source.addEventListener("browser-capture", (event) => {
+      const message = event as MessageEvent<string>;
+      setBrowserCapture(JSON.parse(message.data) as BrowserCapture);
+      setToast("Live Chromium capture received from the submitted target.");
+    });
+    source.addEventListener("failed", (event) => {
+      const message = event as MessageEvent<string>;
+      const failure = JSON.parse(message.data) as { message?: string };
+      setIsLaunching(false);
+      setRunStatus("Browser capture failed");
+      setToast(failure.message ?? "The submitted target could not be captured safely.");
       source.close();
     });
     source.onerror = () => {
@@ -522,10 +613,15 @@ export function ProductShell() {
           if (String(run.status) === "REVIEW") {
             setEvents(Array.isArray(run.events) ? (run.events as AgentEvent[]) : []);
             setFindings(Array.isArray(run.findings) ? (run.findings as Array<Record<string, unknown>>).map(normalizeFinding) : []);
+            setBrowserCapture(normalizeBrowserCapture(run));
             setProgress(100);
             setRunStatus("Ready for review");
             setIsLaunching(false);
             setToast("Simulation complete — the verified run was recovered.");
+          } else if (String(run.status) === "FAILED") {
+            setIsLaunching(false);
+            setRunStatus("Browser capture failed");
+            setToast("The submitted target could not be loaded by the safe browser worker.");
           }
         } catch {
           setIsLaunching(false);
@@ -557,6 +653,7 @@ export function ProductShell() {
     }
     const storedFindings = Array.isArray(run.findings) ? run.findings as Array<Record<string, unknown>> : [];
     setFindings(storedFindings.map(normalizeFinding));
+    setBrowserCapture(normalizeBrowserCapture(run));
     setRunStatus("Ready for review");
     setIsLaunching(false);
     setToast("Simulation complete — three verified findings are ready.");
@@ -575,6 +672,7 @@ export function ProductShell() {
     setView("live");
     setEvents([]);
     setFindings([]);
+    setBrowserCapture(null);
     setProgress(2);
     setRunStatus("Initializing run");
 
@@ -658,6 +756,7 @@ export function ProductShell() {
         id: String(event.id), agent: String(event.agent), title: String(event.title), detail: String(event.detail), progress: Number(event.progress), kind: String(event.kind), createdAt: event.createdAt ? String(event.createdAt) : undefined,
       })) : eventSeeds);
       setFindings(Array.isArray(run.findings) ? (run.findings as Array<Record<string, unknown>>).map(normalizeFinding) : findingSeeds);
+      setBrowserCapture(normalizeBrowserCapture(run));
       setProgress(Number(run.progress ?? 100));
       setRunStatus(String(run.status) === "RUNNING" ? "Agents working" : "Ready for review");
       navigate("live");
@@ -813,6 +912,7 @@ export function ProductShell() {
               runs={runs}
               criticalCount={criticalCount}
               onNavigate={navigate}
+              onOpenRun={(id) => void openRun(id)}
             />
           )}
           {view === "scenario" && (
@@ -845,6 +945,7 @@ export function ProductShell() {
               activeEvent={activeEvent}
               runtime={runtime}
               aiRuntime={aiRuntime}
+              browserCapture={browserCapture}
               onViewFindings={() => navigate("findings")}
               onNewRun={prepareNewRun}
             />
@@ -884,7 +985,15 @@ function PageHeading({ eyebrow, title, copy, actions }: { eyebrow: string; title
   );
 }
 
-function OverviewView({ findings, runs, criticalCount, onNavigate }: { findings: Finding[]; runs: TestRun[]; criticalCount: number; onNavigate: (view: View) => void }) {
+function OverviewView({ findings, runs, criticalCount, onNavigate, onOpenRun }: { findings: Finding[]; runs: TestRun[]; criticalCount: number; onNavigate: (view: View) => void; onOpenRun: (id: string) => void }) {
+  const latestRun = runs[0];
+  const riskBySeverity: Record<Severity, number> = { Critical: 96, High: 82, Medium: 58, Low: 28 };
+  const riskSignals = (findings.length ? findings : findingSeeds).slice(0, 4).map((finding) => ({
+    label: finding.journeyStep.split("·")[0]?.trim() || "Page",
+    value: riskBySeverity[finding.severity],
+  }));
+  const scoredRuns = runs.filter((run) => run.score > 0);
+  const averageScore = scoredRuns.length ? Math.round(scoredRuns.reduce((total, run) => total + run.score, 0) / scoredRuns.length) : 0;
   return (
     <div className="view-stack overview-view">
       <section className="hero-panel">
@@ -894,7 +1003,7 @@ function OverviewView({ findings, runs, criticalCount, onNavigate }: { findings:
           <p>Agentic UX testing that plans journeys, behaves like real people, verifies the evidence, and gives your team a fixable answer.</p>
           <div className="hero-actions">
             <button className="button-primary" onClick={() => onNavigate("scenario")}><Play size={17} fill="currentColor" />Run a simulation</button>
-            <button className="button-secondary" onClick={() => onNavigate("live")}><Eye size={17} />Open latest run</button>
+            <button className="button-secondary" onClick={() => runs[0] ? onOpenRun(runs[0].id) : onNavigate("live")}><Eye size={17} />Open latest run</button>
           </div>
           <div className="hero-proof">
             <span><ShieldCheck size={16} />Human-approved output</span>
@@ -903,14 +1012,14 @@ function OverviewView({ findings, runs, criticalCount, onNavigate }: { findings:
           </div>
         </div>
         <div className="journey-radar-card">
-          <div className="radar-top"><span>Checkout confidence</span><span className="status-pill review">Needs review</span></div>
+          <div className="radar-top"><span>{latestRun?.name ?? "Latest simulation"}</span><span className="status-pill review">{latestRun?.status ?? "Ready"}</span></div>
           <div className="score-row">
-            <div className="score-ring"><strong>72</strong><span>UX score</span></div>
-            <div><p>4 personas · 36 actions</p><strong>{criticalCount} release blockers</strong><span>Predicted completion 76%</span></div>
+            <div className="score-ring"><strong>{latestRun?.score || "—"}</strong><span>UX score</span></div>
+            <div><p>{latestRun?.personas ?? 0} personas · live evidence</p><strong>{criticalCount} release blockers</strong><span>{latestRun?.findings ?? findings.length} verified findings</span></div>
           </div>
           <div className="journey-track" aria-label="Journey risk by step">
-            {[{ label: "Discover", value: 28 }, { label: "Product", value: 68 }, { label: "Cart", value: 42 }, { label: "Checkout", value: 88 }, { label: "Confirm", value: 18 }].map((item) => (
-              <div key={item.label}><span>{item.label}</span><div><i style={{ width: `${item.value}%` }} /></div><small>{item.value}</small></div>
+            {riskSignals.map((item, index) => (
+              <div key={`${item.label}-${index}`}><span>{item.label}</span><div><i style={{ width: `${item.value}%` }} /></div><small>{item.value}</small></div>
             ))}
           </div>
           <button className="text-button" onClick={() => onNavigate("findings")}>Review evidence <ArrowRight size={15} /></button>
@@ -918,10 +1027,10 @@ function OverviewView({ findings, runs, criticalCount, onNavigate }: { findings:
       </section>
 
       <section className="metrics-grid">
-        <Metric icon={TestTube2} label="Journeys tested" value="36" note="+12 this sprint" tone="violet" />
-        <Metric icon={AlertTriangle} label="Release blockers" value={String(criticalCount || 2)} note="2 need review" tone="coral" />
-        <Metric icon={Users} label="Persona coverage" value="84%" note="4 active profiles" tone="blue" />
-        <Metric icon={Gauge} label="Average UX score" value="82" note="+6 after fixes" tone="green" />
+        <Metric icon={TestTube2} label="Runs captured" value={String(runs.length)} note="Persisted browser evidence" tone="violet" />
+        <Metric icon={AlertTriangle} label="Release blockers" value={String(criticalCount)} note="Evidence-verified" tone="coral" />
+        <Metric icon={Users} label="Latest persona coverage" value={String(latestRun?.personas ?? 0)} note="Behavior policies" tone="blue" />
+        <Metric icon={Gauge} label="Average UX score" value={averageScore ? String(averageScore) : "—"} note="Across saved runs" tone="green" />
       </section>
 
       <section className="dashboard-grid">
@@ -944,7 +1053,7 @@ function OverviewView({ findings, runs, criticalCount, onNavigate }: { findings:
           <div className="panel-heading"><div><p className="eyebrow">Recent activity</p><h2>Simulation runs</h2></div><button className="icon-button small" onClick={() => onNavigate("history")} aria-label="Open run history"><History size={16} /></button></div>
           <div className="mini-run-list">
             {runs.slice(0, 3).map((run) => (
-              <button key={run.id} onClick={() => onNavigate("live")}>
+              <button key={run.id} onClick={() => onOpenRun(run.id)}>
                 <span className={`run-status-dot ${run.status.toLowerCase()}`} />
                 <span><strong>{run.name}</strong><small>{run.createdAt} · {run.personas} personas</small></span>
                 <span className="mini-score">{run.score || "—"}</span>
@@ -1029,18 +1138,19 @@ function ScenarioView({ projectName, setProjectName, targetUrl, setTargetUrl, go
   );
 }
 
-function LiveRunView({ projectName, targetUrl, personaCount, progress, status, events, findings, activeEvent, runtime, aiRuntime, onViewFindings, onNewRun }: { projectName: string; targetUrl: string; personaCount: number; progress: number; status: string; events: AgentEvent[]; findings: Finding[]; activeEvent?: AgentEvent; runtime: "connected" | "demo"; aiRuntime: AiRuntime; onViewFindings: () => void; onNewRun: () => void }) {
+function LiveRunView({ projectName, targetUrl, personaCount, progress, status, events, findings, activeEvent, runtime, aiRuntime, browserCapture, onViewFindings, onNewRun }: { projectName: string; targetUrl: string; personaCount: number; progress: number; status: string; events: AgentEvent[]; findings: Finding[]; activeEvent?: AgentEvent; runtime: "connected" | "demo"; aiRuntime: AiRuntime; browserCapture: BrowserCapture | null; onViewFindings: () => void; onNewRun: () => void }) {
   const isComplete = progress === 100;
+  const averageConfidence = findings.length ? Math.round(findings.reduce((sum, finding) => sum + finding.confidence, 0) / findings.length) : 0;
   return (
     <div className="view-stack live-view">
       <PageHeading eyebrow="Run command center" title={projectName} copy={`${personaCount} behavior ${personaCount === 1 ? "policy is" : "policies are"} testing the defined journey.`} actions={<><span className={`live-status ${isComplete ? "complete" : "running"}`}><span />{isComplete ? "Ready for review" : status}</span><button className="button-secondary compact" onClick={onNewRun}><Plus size={16} />New run</button></>} />
       <section className="run-progress-panel panel">
         <div className="run-progress-copy"><span>{isComplete ? <CheckCircle2 size={18} /> : <Activity size={18} />}</span><div><strong>{isComplete ? "Simulation complete" : status}</strong><small>{activeEvent?.detail ?? "All verified evidence is ready for human review."}</small></div></div>
         <div className="progress-wrap"><div className="progress-track"><i style={{ width: `${progress}%` }} /></div><strong>{progress}%</strong></div>
-        <span className="runtime-chip"><CircleDot size={14} />{runtime === "connected" ? (aiRuntime.provider === "openai" ? `OpenAI · ${aiRuntime.model ?? "connected"}` : "Persistent agent runtime") : "Runtime reconnecting"}</span>
+        <span className="runtime-chip"><CircleDot size={14} />{browserCapture ? "Live Chromium evidence" : runtime === "connected" ? (aiRuntime.provider === "openai" ? `OpenAI · ${aiRuntime.model ?? "connected"}` : "Persistent agent runtime") : "Runtime reconnecting"}</span>
       </section>
       <section className="command-grid">
-        <BrowserPreview progress={progress} targetUrl={targetUrl} />
+        <BrowserPreview progress={progress} targetUrl={targetUrl} capture={browserCapture} liveBrowser={aiRuntime.liveBrowser} />
         <div className="panel agent-feed">
           <div className="panel-heading"><div><p className="eyebrow">Agent activity</p><h2>Reasoning trace</h2></div><span className="event-count">{events.length} events</span></div>
           <div className="event-list">
@@ -1050,15 +1160,13 @@ function LiveRunView({ projectName, targetUrl, personaCount, progress, status, e
       </section>
       <section className="live-bottom-grid">
         <div className="panel behavior-panel">
-          <div className="panel-heading"><div><p className="eyebrow">Behavior telemetry</p><h2>Journey signals</h2></div><span className="status-pill neutral">{personaCount} personas</span></div>
-          <div className="signal-grid"><Signal icon={MousePointer2} value="36" label="Interactions" /><Signal icon={Clock3} value="14.2s" label="Peak dwell" /><Signal icon={AlertTriangle} value="5" label="Hesitations" /><Signal icon={Keyboard} value="1" label="Focus failure" /></div>
-          <div className="persona-lanes">
-            {[{ name: "First-time Explorer", progress: 82, state: "Completed" }, { name: "Impatient Shopper", progress: 64, state: "Abandoned" }, { name: "Keyboard Navigator", progress: 48, state: "Blocked" }, { name: "Cautious Buyer", progress: 76, state: "Completed" }].map((persona) => <div key={persona.name}><span>{persona.name}</span><div><i style={{ width: `${persona.progress}%` }} /></div><small className={persona.state.toLowerCase()}>{persona.state}</small></div>)}
-          </div>
+          <div className="panel-heading"><div><p className="eyebrow">Captured telemetry</p><h2>Real page signals</h2></div><span className="status-pill neutral">Read only</span></div>
+          <div className="signal-grid"><Signal icon={MousePointer2} value={String(browserCapture?.metrics.buttons ?? "—")} label="Buttons" /><Signal icon={Network} value={String(browserCapture?.metrics.links ?? "—")} label="Links" /><Signal icon={AlertTriangle} value={String((browserCapture?.metrics.unlabeledControls ?? 0) + (browserCapture?.metrics.missingAltImages ?? 0))} label="A11y flags" /><Signal icon={Keyboard} value={String(browserCapture?.focusSequence.length ?? "—")} label="Focus stops" /></div>
+          <div className="capture-summary"><span><strong>{browserCapture ? `HTTP ${browserCapture.responseStatus || "—"}` : "Awaiting capture"}</strong><small>{browserCapture ? `${browserCapture.loadTimeMs}ms · ${browserCapture.title || "Untitled page"}` : "Chromium will load the submitted public URL."}</small></span><span><strong>{browserCapture?.metrics.consoleErrors ?? 0} console errors</strong><small>{browserCapture?.metrics.failedRequests ?? 0} failed requests · {browserCapture?.metrics.blockedMutations ?? 0} unsafe requests blocked</small></span></div>
         </div>
         <div className="panel verified-panel">
           <div className="verified-icon"><ShieldCheck size={24} /></div><p className="eyebrow">Verified output</p><h2>{findings.length || 3} findings with evidence</h2><p>The verifier removed unsupported observations. Every retained issue includes behavior signals, a page locator, and a recommended fix.</p>
-          <div className="verified-stats"><span><strong>{findings.filter((finding) => finding.severity === "Critical").length || 1}</strong>critical</span><span><strong>94%</strong>avg confidence</span><span><strong>2</strong>personas blocked</span></div>
+          <div className="verified-stats"><span><strong>{findings.filter((finding) => finding.severity === "Critical").length}</strong>critical</span><span><strong>{averageConfidence || "—"}{averageConfidence ? "%" : ""}</strong>avg confidence</span><span><strong>{browserCapture ? "1" : "—"}</strong>live capture</span></div>
         <button className="button-primary" onClick={onViewFindings} disabled={!isComplete}>Review findings <ArrowRight size={16} /></button>
         </div>
       </section>
@@ -1066,22 +1174,16 @@ function LiveRunView({ projectName, targetUrl, personaCount, progress, status, e
   );
 }
 
-function BrowserPreview({ progress, targetUrl }: { progress: number; targetUrl: string }) {
-  const [paymentReady, setPaymentReady] = useState(false);
-  const [promoOpen, setPromoOpen] = useState(false);
+function BrowserPreview({ progress, targetUrl, capture, liveBrowser }: { progress: number; targetUrl: string; capture: BrowserCapture | null; liveBrowser: boolean }) {
+  const displayedUrl = capture?.finalUrl ?? targetUrl;
+  const viewport = capture?.viewport ?? { width: 1280, height: 800 };
   return (
     <div className="panel browser-panel">
-      <div className="browser-bar"><span className="window-dots"><i /><i /><i /></span><div className="browser-address"><ShieldCheck size={13} />{targetUrl.replace(/^https?:\/\//, "")}</div><span className="viewport-pill">1280 × 800</span></div>
+      <div className="browser-bar"><span className="window-dots"><i /><i /><i /></span><div className="browser-address"><ShieldCheck size={13} />{displayedUrl.replace(/^https?:\/\//, "")}</div><span className="viewport-pill">{viewport.width} × {viewport.height}</span></div>
       <div className="browser-stage">
-        <div className="mock-store-header"><strong>NOVA</strong><span>New in&nbsp;&nbsp;&nbsp; Women&nbsp;&nbsp;&nbsp; Men&nbsp;&nbsp;&nbsp; Journal</span><span><Search size={15} /><Users size={15} /></span></div>
-        <div className="checkout-layout">
-          <div className="checkout-form"><span className="mock-back">← Return to cart</span><h3>{paymentReady ? "Payment ready" : "Secure checkout"}</h3><div className="step-pills"><span className="done">1</span><i /><span className="done">2</span><i /><span className={paymentReady ? "done" : ""}>3</span></div><label>Email address<input value="alex@example.com" readOnly /></label><div className="field-pair"><label>First name<input value="Alex" readOnly /></label><label>Last name<input value="Morgan" readOnly /></label></div><label>Delivery option<div className="mock-radio selected"><CircleDot size={15} /><span>Express delivery<small>Arrives tomorrow</small></span><strong>₹240</strong></div></label><button type="button" onClick={() => setPaymentReady(true)}>{paymentReady ? "Payment step reached" : "Continue to payment"}</button></div>
-          <div className="order-card"><p>Order summary</p><div className="product-thumb" /><strong>Everyday Runner</strong><small>Cloud / EU 39</small><hr /><span><small>Subtotal</small><strong>₹6,490</strong></span><span className="risk-line"><small>Delivery</small><strong>₹240</strong><i>Late reveal</i></span><span><small>Total</small><strong>₹6,730</strong></span><button type="button" className="promo-control" aria-expanded={promoOpen} onClick={() => setPromoOpen((open) => !open)}>Add promotion code <ChevronDown size={14} /></button>{promoOpen && <input className="promo-input" aria-label="Promotion code" placeholder="Enter code" />}</div>
-        </div>
-        {progress > 35 && progress < 100 && <div className="agent-cursor" style={{ left: `${Math.min(78, 28 + progress / 2)}%`, top: `${Math.max(34, 70 - progress / 3)}%` }}><MousePointer2 size={16} /><span>{progress < 65 ? "Impatient Shopper" : "Observer"}</span></div>}
-        {progress === 100 && <><div className="risk-outline delivery-risk"><span>01</span></div><div className="risk-outline promo-risk"><span>02</span></div></>}
+        {capture ? <img className="live-browser-screenshot" src={capture.screenshot} alt={`Live Chromium capture of ${capture.title || capture.finalUrl}`} /> : <div className="browser-capture-state">{progress < 100 ? <Activity className="spin" size={26} /> : <AlertTriangle size={26} />}<strong>{progress < 100 ? "Opening the submitted site in Chromium" : "No live screenshot was captured"}</strong><span>{liveBrowser ? "Read-only safe mode blocks submissions, downloads, and private network access." : "Enable the local live-browser worker to capture real evidence."}</span></div>}
       </div>
-      <div className="browser-footer"><span><span className={`runtime-dot ${progress === 100 ? "connected" : "demo"}`} />{progress === 100 ? "Evidence capture complete" : "Session recording"}</span><span>DOM + A11y + Console + Behavior</span></div>
+      <div className="browser-footer"><span><span className={`runtime-dot ${capture ? "connected" : "demo"}`} />{capture ? "Real evidence capture complete" : "Secure browser session"}</span><span>Screenshot + DOM + A11y + Focus + Console</span></div>
     </div>
   );
 }
@@ -1113,8 +1215,8 @@ function FindingsView({ findings, onReview, onExport, onCreateTickets }: { findi
         </div>
         <article className="finding-detail">
           <div className="panel detail-header"><div className="detail-title-row"><span className={`severity-mark large ${selected.severity.toLowerCase()}`}><AlertTriangle size={20} /></span><div><span className={`severity-pill ${selected.severity.toLowerCase()}`}>{selected.severity} severity</span><h2>{selected.title}</h2><p>{selected.summary}</p></div></div><div className="confidence-block"><strong>{selected.confidence}%</strong><span>confidence</span></div></div>
-          <div className="panel evidence-card"><div className="panel-heading"><div><p className="eyebrow">Reproducible evidence</p><h2>What the agent observed</h2></div><span className="verified-badge"><BadgeCheck size={15} />Verified</span></div><div className="evidence-preview"><div className="evidence-screen"><div className="evidence-nav" /><div className="evidence-product"><div /><span /><span /><span className="focus-gap" /></div><div className="evidence-label"><Keyboard size={14} />Focus jumped over this control</div></div><div className="evidence-facts"><span><small>Behavior signal</small><strong>{selected.evidence.signal}</strong></span><span><small>Page element</small><code>{selected.evidence.selector}</code></span><span><small>Persona</small><strong>{selected.persona}</strong></span></div></div></div>
-          <div className="panel recommendation-card"><span className="recommendation-icon"><Sparkles size={19} /></span><div><p className="eyebrow">Recommended fix</p><h2>Make the interaction reachable and explicit</h2><p>{selected.recommendation}</p><div className="code-hint"><Code2 size={16} /><span>Engineering note</span><code>Prefer semantic controls · preserve expected focus order</code></div></div></div>
+          <div className="panel evidence-card"><div className="panel-heading"><div><p className="eyebrow">Reproducible evidence</p><h2>What the agent observed</h2></div><span className="verified-badge"><BadgeCheck size={15} />Verified</span></div><div className="evidence-preview"><div className="evidence-screen">{selected.evidence.screenshot.startsWith("data:image/") ? <img src={selected.evidence.screenshot} alt="Captured target viewport for this finding" /> : <div className="evidence-placeholder"><Eye size={24} /><span>Screenshot unavailable for this legacy finding</span></div>}<div className="evidence-label"><Eye size={14} />Captured viewport</div></div><div className="evidence-facts"><span><small>Observed signal</small><strong>{selected.evidence.signal}</strong></span><span><small>Page element</small><code>{selected.evidence.selector}</code></span><span><small>Persona context</small><strong>{selected.persona}</strong></span></div></div></div>
+          <div className="panel recommendation-card"><span className="recommendation-icon"><Sparkles size={19} /></span><div><p className="eyebrow">Recommended fix</p><h2>Implementation guidance</h2><p>{selected.recommendation}</p><div className="code-hint"><Code2 size={16} /><span>Evidence source</span><code>Read-only Chromium capture · human approval required</code></div></div></div>
           <div className="review-actions"><button className="button-ghost" onClick={() => onReview(selected.id, "Dismissed")}><X size={16} />Dismiss with note</button><button className="button-primary" onClick={() => onReview(selected.id, "Approved")}><Check size={17} />Approve finding</button></div>
         </article>
       </section>

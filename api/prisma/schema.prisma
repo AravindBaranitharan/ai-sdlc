@@ -43,23 +43,29 @@ model Persona {
 }
 
 model TestRun {
-  id              String     @id @default(cuid())
-  projectId       String
-  project         Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  goal            String
-  successCriteria String       @default("Journey completes successfully.")
-  targetUrl       String
-  personaIds      String[]
-  status          RunStatus  @default(QUEUED)
-  progress        Int        @default(0)
-  uxScore         Int?
-  completionRate  Int?
-  frictionCount   Int        @default(0)
-  startedAt       DateTime?
-  completedAt     DateTime?
-  createdAt       DateTime   @default(now())
-  events          RunEvent[]
-  findings        Finding[]
+  id                String     @id @default(cuid())
+  projectId         String
+  project           Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  goal              String
+  successCriteria   String     @default("Journey completes successfully.")
+  targetUrl         String
+  personaIds        String[]
+  status            RunStatus  @default(QUEUED)
+  progress          Int        @default(0)
+  uxScore           Int?
+  completionRate    Int?
+  frictionCount     Int        @default(0)
+  browserMode       String?
+  browserFinalUrl   String?
+  browserTitle      String?
+  browserScreenshot String?    @db.Text
+  browserEvidence   Json?
+  browserCapturedAt DateTime?
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime   @default(now())
+  events            RunEvent[]
+  findings          Finding[]
 }
 
 model RunEvent {

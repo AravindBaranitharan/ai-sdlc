@@ -19,7 +19,7 @@ TraceUX is an end-to-end hackathon prototype for agentic UX testing. It turns a 
 - D1 and Drizzle: persistent hosted-demo run records
 - Agent pipeline: orchestrator → planner → persona → browser → observer → analyst → verifier → reporter → human review
 
-The prototype uses the OpenAI Responses API with Structured Outputs when `AI_PROVIDER=openai` and `OPENAI_API_KEY` are configured. It falls back to a deterministic engine when the model is unavailable, so the demo remains usable without exposing a key to the browser. A real Playwright executor can be connected at the existing browser-agent boundary without changing the UI contract.
+The local prototype uses a read-only Playwright Chromium worker to load the submitted public URL, capture the real viewport, DOM/accessibility structure, focus sequence, network failures, and console errors. The OpenAI Responses API analyzes that evidence with Structured Outputs when `AI_PROVIDER=openai` and `OPENAI_API_KEY` are configured. Without a key, the product returns deterministic findings derived from the captured browser signals.
 
 ## One-command local setup
 
@@ -31,7 +31,7 @@ npm run traceux
 
 The launcher is compatible with Windows, macOS, and Linux. `npm run traceUX` is also accepted on Windows if that capitalization is used.
 
-That single command installs dependencies, starts PostgreSQL, applies migrations, adds the demo personas, and launches both the web application and NestJS API. Open `http://localhost:3000`.
+That single command installs dependencies and Chromium, starts PostgreSQL, applies migrations, adds the demo personas, and launches both the web application and NestJS API. Open `http://localhost:3000`.
 
 The first run creates a git-ignored `.env` file automatically. The product works immediately with its safe fallback engine. For live OpenAI analysis, add a fresh key to that one file and restart the command:
 
@@ -54,6 +54,7 @@ npx tsc --noEmit
 ## Prototype safety
 
 - Simulation targets are treated as read-only by the prototype runtime.
+- Private/local network targets, non-HTTP URLs, form submissions, downloads, and non-GET requests are blocked by the live browser worker.
 - Recommendations are evidence-linked and verified before display.
 - Ticket creation and product changes remain behind human approval.
 - Production browser execution should add URL allowlists, isolated workers, secrets management, PII redaction, and artifact retention policies.
